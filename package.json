@@ -67,5 +67,16 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
     "vite": "^7.2.6"
+  },
+  "allowScripts": {
+    "electron@39.8.7": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.27.7": true,
+    "active-win@8.2.1": true,
+    "electron-winstaller@5.4.0": true,
+    "extract-file-icon@0.3.2": true,
+    "get-windows@9.3.0": true,
+    "node-window-manager@2.2.4": true,
+    "@hurdlegroup/robotjs@0.12.3": true
   }
 }

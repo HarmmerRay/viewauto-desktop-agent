@@ -1,4 +1,4 @@
-import { clipboard } from 'electron'
+﻿import { clipboard } from 'electron'
 import { AppType } from './types'
 import { getWindowInfo } from './window-utils'
 import { getInputAreaFromCache } from './vision-utils'
@@ -8,7 +8,7 @@ const IS_MAC = process.platform === 'darwin'
 import { delay, randomDelayIn, getRobot } from './util'
 
 // 原版 whatsapp-agent-demo 的贝塞尔曲线仿人滑动
-async function humanLikeMove(
+export async function humanLikeMove(
   targetX: number,
   targetY: number,
   options: {
@@ -41,15 +41,17 @@ async function humanLikeMove(
   // 生成贝塞尔曲线控制点 (Cubic Bezier)
   const ctrl1X = startPos.x + dx * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
   const ctrl1Y = startPos.y + dy * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
-  const ctrl2X = startPos.x + dx * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
-  const ctrl2Y = startPos.y + dy * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
+  const ctrl2X =
+    startPos.x + dx * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
+  const ctrl2Y =
+    startPos.y + dy * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
 
   for (let i = 1; i <= steps; i++) {
     const t = i / steps
-    
+
     // 匀速转非线性 (Ease Out)
     const easeT = t * (2 - t)
-    
+
     const mt = 1 - easeT
     const mt2 = mt * mt
     const mt3 = mt2 * mt
@@ -57,8 +59,10 @@ async function humanLikeMove(
     const easeT3 = easeT2 * easeT
 
     // 贝塞尔曲线公式计算
-    const x = mt3 * startPos.x + 3 * mt2 * easeT * ctrl1X + 3 * mt * easeT2 * ctrl2X + easeT3 * targetX
-    const y = mt3 * startPos.y + 3 * mt2 * easeT * ctrl1Y + 3 * mt * easeT2 * ctrl2Y + easeT3 * targetY
+    const x =
+      mt3 * startPos.x + 3 * mt2 * easeT * ctrl1X + 3 * mt * easeT2 * ctrl2X + easeT3 * targetX
+    const y =
+      mt3 * startPos.y + 3 * mt2 * easeT * ctrl1Y + 3 * mt * easeT2 * ctrl2Y + easeT3 * targetY
 
     // 加入随机细微抖动 (±1像素)
     const jitterX = i === steps ? 0 : (Math.random() - 0.5) * 2
@@ -69,7 +73,7 @@ async function humanLikeMove(
     // 变频延迟，模拟人类微停顿
     let stepDelay = baseDelay + Math.random() * 2
     if (i > steps * 0.8) stepDelay += 2
-    
+
     await delay(stepDelay)
   }
 }
@@ -104,11 +108,57 @@ export async function humanLikeClick(button: 'left' | 'right' = 'left'): Promise
   }
 }
 
+/** 移动到指定坐标后，以拟人化按压方式单击。 */
+export async function humanLikeClickAt(x: number, y: number): Promise<void> {
+  await humanLikeMove(x, y)
+  await randomDelayIn(90, 180)
+  await humanLikeClick('left')
+}
+
+/**
+ * 聚焦输入框并替换其中的文本。x/y 省略时沿用当前已经获得焦点的输入框。
+ * 默认只填写不提交；需要提交时由调用方显式调用 pressEnterAction。
+ */
+export async function replaceTextAtAction(
+  x: number | undefined,
+  y: number | undefined,
+  text: string,
+  submit = false
+): Promise<void> {
+  const robot = getRobot()
+  if (!robot) throw new Error('RobotJS 缺失，无法输入文本')
+
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    await humanLikeClickAt(x as number, y as number)
+  }
+
+  await randomDelayIn(100, 180)
+  robot.keyTap('a', [IS_MAC ? 'command' : 'control'])
+  await randomDelayIn(40, 90)
+  clipboard.writeText(text)
+  robot.keyTap('v', [IS_MAC ? 'command' : 'control'])
+  await randomDelayIn(180, 280)
+
+  if (submit) {
+    robot.keyTap('enter')
+  }
+}
+
+export async function pressEnterAction(): Promise<void> {
+  const robot = getRobot()
+  if (!robot) throw new Error('RobotJS 缺失，无法执行回车')
+  await randomDelayIn(100, 180)
+  robot.keyTap('enter')
+}
+
 const getWeChatInputPosition = (bounds: any, scaleFactor: number) => {
   if (IS_WINDOWS) {
     const baseInputX = Math.round((bounds.x + bounds.width - 150) * scaleFactor)
     const baseInputY = Math.round((bounds.y + bounds.height - 40) * scaleFactor)
-    return { inputX: baseInputX + (Math.random() - 0.5) * 20, inputY: baseInputY - Math.random() * 5 }
+    return {
+      inputX: baseInputX + (Math.random() - 0.5) * 20,
+      inputY: baseInputY - Math.random() * 5
+    }
   }
   const baseInputX = bounds.x + bounds.width - 250
   const baseInputY = bounds.y + bounds.height - 20
@@ -265,9 +315,7 @@ export async function activeUnreadByClickAction(
  *
  * 参考 whatsapp-agent-demo 的 clickUnreadContact
  */
-export async function clickUnreadContactAction(
-  coordinates: [number, number]
-): Promise<void> {
+export async function clickUnreadContactAction(coordinates: [number, number]): Promise<void> {
   const robot = getRobot()
   if (!robot) return
 

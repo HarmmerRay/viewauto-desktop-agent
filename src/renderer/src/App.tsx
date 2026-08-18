@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { t } from './i18n'
 import logoUrl from './assets/logo.png'
 import MemoryWindow from './MemoryWindow'
@@ -12,7 +12,8 @@ interface LogEntry {
 
 type EngineStatus = 'idle' | 'running' | 'error'
 type SettingsSection = 'base' | 'agent'
-type AppType = 'wechat' | 'wework' | 'dingtalk' | 'lark' | 'slack' | 'telegram' | 'generic'
+type OperationMode = 'monitor' | 'add-friend'
+type AppType = 'wechat'
 
 type CaptureStrategy = 'auto' | 'vlm' | 'box-select'
 
@@ -33,20 +34,18 @@ interface BoxRegions {
   capturedAt: number
 }
 
-const APP_TYPE_LABELS: Record<AppType, string> = {
-  wechat: '微信',
-  wework: '企业微信',
-  dingtalk: '钉钉',
-  lark: '飞书 / Lark',
-  slack: 'Slack',
-  telegram: 'Telegram',
-  generic: '其他桌面应用'
-}
-
-const VLM_SUPPORTED_APPS: AppType[] = ['wechat', 'wework']
-
-function isVlmSupported(appType: AppType): boolean {
-  return VLM_SUPPORTED_APPS.includes(appType)
+interface WechatFriendOperationStatus {
+  stage:
+    | 'idle'
+    | 'preparing'
+    | 'awaiting_confirmation'
+    | 'sending'
+    | 'completed'
+    | 'cancelled'
+    | 'failed'
+  account?: string
+  sessionId?: string | null
+  detail?: string
 }
 
 interface ProviderSchemaField {
@@ -132,15 +131,25 @@ interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  customerApiUrl: string
   defaultCaptureStrategy: CaptureStrategy
   capture: Partial<Record<AppType, PerAppCapture>>
 }
+
+const VERIFICATION_MESSAGES: Array<{ id: string; label: string; message: string }> = [
+  {
+    id: 'default',
+    label: '直播增量（默认话术）',
+    message: '您好：我这边是直播增量部门的，无需投入任何成本，每月额外多增50%的销量，可以认识聊聊'
+  }
+]
 
 const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
   {
     id: 'doubao',
     name: '豆包 Seed',
-    description: '本地内置聊天 Provider，使用基础配置中的火山方舟密钥。',
+    description:
+      '内置 OpenAI 兼容回复 Provider，可独立配置 API Key、Base URL 和支持图片输入的模型。',
     version: '1.0.0',
     manifestUrl: 'builtin://doubao',
     capabilities: ['chat'],
@@ -158,14 +167,17 @@ const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
           label: '模型',
           type: 'text',
           required: true,
-          readonly: true,
-          defaultValue: 'doubao-seed-2-0-lite-260428'
+          defaultValue: 'doubao-seed-2-0-lite-260215',
+          hint: '回复流程会把聊天截图发送给模型，因此模型必须支持图片输入。'
         },
         {
           key: 'baseURL',
           label: 'Base URL',
           type: 'url',
-          placeholder: 'https://ark.cn-beijing.volces.com/api/v3'
+          required: true,
+          placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
+          defaultValue: 'https://ark.cn-beijing.volces.com/api/v3',
+          hint: '支持填写 API 根地址，或直接填写完整的 /chat/completions 地址。'
         },
         {
           key: 'systemPrompt',
@@ -239,6 +251,7 @@ const RefreshIcon = (): React.JSX.Element => (
 function App() {
   const windowKind = new URLSearchParams(window.location.search).get('window')
   const [status, setStatus] = useState<EngineStatus>('idle')
+  const [operationMode, setOperationMode] = useState<OperationMode>('monitor')
 
   // Sync UI status with engine state changes triggered out-of-band
   // (e.g. remote OpenClaw start/pause via the local skill HTTP server).
@@ -274,10 +287,15 @@ function App() {
       </header>
 
       <div className="app-content">
-        <ControlPanel status={status} setStatus={setStatus} />
+        <ControlPanel
+          status={status}
+          setStatus={setStatus}
+          operationMode={operationMode}
+          setOperationMode={setOperationMode}
+        />
       </div>
 
-      <BottomBar status={status} setStatus={setStatus} />
+      <BottomBar status={status} setStatus={setStatus} operationMode={operationMode} />
 
       <Toast />
     </div>
@@ -286,80 +304,20 @@ function App() {
 
 function ControlPanel({
   status,
-  setStatus
+  setStatus,
+  operationMode,
+  setOperationMode
 }: {
   status: EngineStatus
   setStatus: (s: EngineStatus) => void
+  operationMode: OperationMode
+  setOperationMode: (mode: OperationMode) => void
 }) {
   const [logs, setLogs] = useState<LogEntry[]>([])
+  const [verificationId, setVerificationId] = useState(VERIFICATION_MESSAGES[0].id)
+  const [friendAddMode, setFriendAddMode] = useState<'single' | 'continuous'>('single')
+  const [friendStatus, setFriendStatus] = useState<WechatFriendOperationStatus>({ stage: 'idle' })
   const logRef = useRef<HTMLDivElement>(null)
-
-  // 首屏目标应用 + 框选状态：直接读 / 写 settings，让用户上手第一步就能完成。
-  const [appType, setAppType] = useState<AppType>('wechat')
-  const [regions, setRegions] = useState<BoxRegions | null>(null)
-  const [openingWizard, setOpeningWizard] = useState(false)
-
-  const reloadRegionsForApp = useCallback(async (type: AppType) => {
-    const r = (await window.electron?.invoke('capture:getRegions', type)) as BoxRegions | null
-    setRegions(r ?? null)
-  }, [])
-
-  // 初次加载：读出当前 appType + 对应的框选区域
-  useEffect(() => {
-    void (async () => {
-      const settings = (await window.electron?.invoke('settings:getAll')) as
-        | AppSettings
-        | undefined
-      const initial = settings?.appType || 'wechat'
-      setAppType(initial)
-      await reloadRegionsForApp(initial)
-    })()
-  }, [reloadRegionsForApp])
-
-  // 监听 main 进程的"区域已更新"事件——比如向导刚跑完
-  useEffect(() => {
-    const cleanup = window.electron?.on(
-      'capture:regions-updated',
-      (data: { appType: AppType; regions: BoxRegions | null }) => {
-        if (data.appType === appType) setRegions(data.regions)
-      }
-    )
-    return cleanup
-  }, [appType])
-
-  const handleAppTypeChange = useCallback(
-    async (next: AppType) => {
-      if (status === 'running') return
-      setAppType(next)
-      await window.electron?.invoke('settings:set', { appType: next })
-      await window.electron?.invoke('engine:updateConfig', {
-        ...((await window.electron?.invoke('settings:getAll')) as AppSettings),
-        appType: next
-      })
-      await reloadRegionsForApp(next)
-    },
-    [reloadRegionsForApp, status]
-  )
-
-  const handleOpenWizard = useCallback(async () => {
-    if (status === 'running') return
-    setOpeningWizard(true)
-    try {
-      const result = (await window.electron?.invoke('capture:openSetupWizard', {
-        appType
-      })) as { success: boolean; reason?: string; regions?: BoxRegions } | undefined
-      if (result?.success && result.regions) {
-        setRegions(result.regions)
-        showToast('已保存框选区域', 'success')
-      } else if (result?.reason === 'cancelled' || result?.reason === 'closed') {
-        showToast('框选已取消', 'error')
-      } else {
-        showToast('框选失败', 'error')
-      }
-    } finally {
-      setOpeningWizard(false)
-    }
-  }, [appType, status])
 
   const addLog = useCallback((type: LogEntry['type'], content: string) => {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false })
@@ -367,21 +325,68 @@ function ControlPanel({
   }, [])
 
   useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
-    }
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [logs])
 
   useEffect(() => {
     const cleanup = window.electron?.on('engine:log', (data: { type: string; content: string }) => {
       addLog(data.type as LogEntry['type'], data.content)
-
-      if (data.type === 'error' && data.content.includes('引擎无法启动')) {
-        setStatus('error')
-      }
+      if (data.type === 'error' && data.content.includes('引擎无法启动')) setStatus('error')
     })
     return cleanup
   }, [addLog, setStatus])
+
+  useEffect(() => {
+    void (async () => {
+      const current = (await window.electron?.invoke('wechatFriend:getStatus')) as
+        | WechatFriendOperationStatus
+        | undefined
+      if (current) setFriendStatus(current)
+    })()
+    const cleanup = window.electron?.on('wechatFriend:state', (next: WechatFriendOperationStatus) =>
+      setFriendStatus(next)
+    )
+    return cleanup
+  }, [])
+
+  const friendBusy = friendStatus.stage === 'preparing' || friendStatus.stage === 'sending'
+  const awaitingConfirmation = friendStatus.stage === 'awaiting_confirmation'
+  const operationLocked = status === 'running' || friendBusy || awaitingConfirmation
+
+  const handleAutoAddFriend = useCallback(async () => {
+    const option =
+      VERIFICATION_MESSAGES.find((item) => item.id === verificationId) || VERIFICATION_MESSAGES[0]
+    const result = (await window.electron?.invoke('wechatFriend:autoAdd', {
+      verificationMessage: option.message,
+      mode: friendAddMode
+    })) as
+      | {
+          success: boolean
+          stage: string
+          customer?: { name: string }
+          addedCount?: number
+          detail?: string
+          error?: string
+        }
+      | undefined
+    if (result?.success) {
+      const addedCount = result.addedCount || 0
+      if (addedCount > 1) {
+        showToast(`已发送 ${addedCount} 个好友申请`, 'success')
+      } else {
+        showToast(
+          result.customer ? `已发送好友申请：${result.customer.name}` : result.detail || '已完成',
+          'success'
+        )
+      }
+    } else {
+      showToast(result?.error || '自动添加好友失败', 'error')
+    }
+  }, [verificationId, friendAddMode])
+
+  const handleStopAutoAdd = useCallback(async () => {
+    await window.electron?.invoke('wechatFriend:stop')
+  }, [])
 
   const statusLabel =
     status === 'running'
@@ -390,8 +395,15 @@ function ControlPanel({
         ? t('status.error')
         : t('status.idle')
 
-  const isVlm = isVlmSupported(appType)
-  const captureReady = isVlm || regions !== null
+  const friendStatusText: Record<WechatFriendOperationStatus['stage'], string> = {
+    idle: '尚未开始',
+    preparing: '正在取号并准备微信界面',
+    awaiting_confirmation: '已填写，等待你确认发送',
+    sending: '正在自动添加并发送申请',
+    completed: '好友申请已发送并回写',
+    cancelled: '已取消发送',
+    failed: '操作失败'
+  }
 
   return (
     <div className="fade-in">
@@ -400,16 +412,125 @@ function ControlPanel({
         <span className="status-text">{statusLabel}</span>
       </div>
 
-      <TargetAppQuickCard
-        appType={appType}
-        regions={regions}
-        captureReady={captureReady}
-        isVlm={isVlm}
-        openingWizard={openingWizard}
-        running={status === 'running'}
-        onAppTypeChange={handleAppTypeChange}
-        onOpenWizard={handleOpenWizard}
-      />
+      <div className="card wechat-target-card">
+        <div className="card-title">目标应用</div>
+        <div className="wechat-target-row">
+          <div className="wechat-logo-mark">微</div>
+          <div className="wechat-target-copy">
+            <strong>微信</strong>
+            <span>自动识别（VLM） · 拟人鼠标移动与点击</span>
+          </div>
+          <span className="wechat-only-badge">仅微信</span>
+        </div>
+        <div className="form-hint wechat-target-hint">此二创版本已在界面和运行时禁用其他平台。</div>
+      </div>
+
+      <div className="operation-tabs" role="tablist" aria-label="微信操作">
+        <button
+          className={`operation-tab ${operationMode === 'monitor' ? 'active' : ''}`}
+          onClick={() => setOperationMode('monitor')}
+          disabled={operationLocked && operationMode !== 'monitor'}
+        >
+          消息监控与回复
+        </button>
+        <button
+          className={`operation-tab ${operationMode === 'add-friend' ? 'active' : ''}`}
+          onClick={() => setOperationMode('add-friend')}
+          disabled={operationLocked && operationMode !== 'add-friend'}
+        >
+          添加微信好友
+        </button>
+      </div>
+
+      {operationMode === 'add-friend' && (
+        <div className="card friend-operation-form">
+          <div className="card-title">添加微信好友（自动取号）</div>
+          <div className="friend-operation-notice">
+            系统会自动从后端取「待添加」客户，搜索并发送好友申请，备注自动设为“名字-渠道”，发送后自动回写状态并记录当前微信号。
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">添加模式</label>
+            <div className="friend-mode-toggle" role="radiogroup" aria-label="添加模式">
+              <button
+                type="button"
+                className={`friend-mode-option ${friendAddMode === 'single' ? 'active' : ''}`}
+                onClick={() => setFriendAddMode('single')}
+                disabled={friendBusy || awaitingConfirmation}
+                role="radio"
+                aria-checked={friendAddMode === 'single'}
+              >
+                一次添加一个
+              </button>
+              <button
+                type="button"
+                className={`friend-mode-option ${friendAddMode === 'continuous' ? 'active' : ''}`}
+                onClick={() => setFriendAddMode('continuous')}
+                disabled={friendBusy || awaitingConfirmation}
+                role="radio"
+                aria-checked={friendAddMode === 'continuous'}
+              >
+                持续添加不停歇
+              </button>
+            </div>
+            <div className="form-hint">
+              {friendAddMode === 'single'
+                ? '每次只取一个「待添加」客户，添加完成后自动停止。'
+                : '连续取号并逐个添加，直到没有「待添加」客户或手动点击停止。'}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label" htmlFor="friend-verification">
+              验证消息话术
+            </label>
+            <select
+              id="friend-verification"
+              className="form-input"
+              value={verificationId}
+              onChange={(event) => setVerificationId(event.target.value)}
+              disabled={friendBusy || awaitingConfirmation}
+            >
+              {VERIFICATION_MESSAGES.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            <div className="form-hint">
+              当前话术：{VERIFICATION_MESSAGES.find((item) => item.id === verificationId)?.message}
+            </div>
+          </div>
+
+          <div className={`friend-operation-status stage-${friendStatus.stage}`}>
+            <span className="friend-status-dot" />
+            <div>
+              <strong>{friendStatusText[friendStatus.stage]}</strong>
+              {friendStatus.detail && <span>{friendStatus.detail}</span>}
+            </div>
+          </div>
+
+          <div className="friend-actions">
+            {friendBusy && friendAddMode === 'continuous' ? (
+              <button className="btn btn-secondary btn-large" onClick={handleStopAutoAdd}>
+                停止添加
+              </button>
+            ) : (
+              <button
+                className="btn btn-primary btn-large"
+                onClick={handleAutoAddFriend}
+                disabled={friendBusy || awaitingConfirmation || status === 'running'}
+              >
+                {friendBusy
+                  ? '正在自动添加...'
+                  : friendAddMode === 'continuous'
+                    ? '开始持续添加'
+                    : '开始自动添加'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-title">{t('control.log')}</div>
@@ -433,145 +554,35 @@ function ControlPanel({
   )
 }
 
-interface TargetAppQuickCardProps {
-  appType: AppType
-  regions: BoxRegions | null
-  captureReady: boolean
-  isVlm: boolean
-  openingWizard: boolean
-  running: boolean
-  onAppTypeChange: (t: AppType) => void
-  onOpenWizard: () => void
-}
-
-// 首屏的"目标应用 + 框选"快捷卡片：让新用户开箱即用，不用先翻设置。
-function TargetAppQuickCard({
-  appType,
-  regions,
-  captureReady,
-  isVlm,
-  openingWizard,
-  running,
-  onAppTypeChange,
-  onOpenWizard
-}: TargetAppQuickCardProps): React.JSX.Element {
-  const statusText = isVlm
-    ? '自动识别（VLM）'
-    : regions
-      ? '已框选 3 / 3 个区域'
-      : '尚未框选'
-
-  return (
-    <div className="card" style={{ marginBottom: 12 }}>
-      <div className="card-title">目标应用</div>
-
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-        <select
-          className="form-input"
-          value={appType}
-          onChange={(e) => onAppTypeChange(e.target.value as AppType)}
-          disabled={running || openingWizard}
-          style={{ flex: 1 }}
-        >
-          {(Object.keys(APP_TYPE_LABELS) as AppType[]).map((type) => (
-            <option key={type} value={type}>
-              {APP_TYPE_LABELS[type]}
-              {!isVlmSupported(type) ? '（框选）' : ''}
-            </option>
-          ))}
-        </select>
-
-        {!isVlm && (
-          <button
-            className="btn btn-primary"
-            onClick={onOpenWizard}
-            disabled={running || openingWizard}
-            style={{
-              whiteSpace: 'nowrap',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6
-            }}
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              {regions ? (
-                // 重新框选 — 旋转刷新图标
-                <>
-                  <path d="M21 12a9 9 0 1 1-3-6.7" />
-                  <path d="M21 4v5h-5" />
-                </>
-              ) : (
-                // 开始框选 — 矩形 + 十字
-                <>
-                  <rect x="3" y="3" width="18" height="18" rx="2" />
-                  <line x1="12" y1="8" x2="12" y2="16" />
-                  <line x1="8" y1="12" x2="16" y2="12" />
-                </>
-              )}
-            </svg>
-            {openingWizard ? '打开中...' : regions ? '重新框选' : '开始框选'}
-          </button>
-        )}
-      </div>
-
-      <div
-        className="form-hint"
-        style={{
-          marginTop: 10,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          color: captureReady ? '#94a3b8' : '#fbbf24'
-        }}
-      >
-        <span
-          style={{
-            display: 'inline-block',
-            width: 8,
-            height: 8,
-            borderRadius: 999,
-            background: captureReady ? '#34d399' : '#fbbf24'
-          }}
-        />
-        {statusText}
-        {!isVlm && !regions ? '：点右侧按钮先把 3 个关键区域圈出来' : ''}
-      </div>
-    </div>
-  )
-}
-
 function BottomBar({
   status,
-  setStatus
+  setStatus,
+  operationMode
 }: {
   status: EngineStatus
   setStatus: (s: EngineStatus) => void
+  operationMode: OperationMode
 }) {
   const handleStart = useCallback(async () => {
     const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
-    if (!settings?.vision?.apiKey) {
+    if (!settings) return
+
+    if (!settings.vision?.apiKey) {
       showToast(t('control.start.novisionkey'), 'error')
       return
     }
-    // 没装自定义 provider → 走内置 doubao（getInstalled 会返回 isBuiltinDefault: true）
+
     const providerInfo = (await window.electron?.invoke('provider:getInstalled')) as {
       manifest: ProviderManifest | null
       isBuiltinDefault?: boolean
     }
-    // doubao 默认共享视觉密钥，required 已剥离 apiKey
     const required = providerInfo?.manifest?.configSchema?.required || []
+    const isBuiltinDoubao = providerInfo?.isBuiltinDefault === true
     const missing = required.find((key) => {
-      const value = settings.chatProvider.config?.[key]
+      const value =
+        isBuiltinDoubao && key === 'apiKey'
+          ? settings.chatProvider.config?.apiKey || settings.vision.apiKey
+          : settings.chatProvider.config?.[key]
       return value === undefined || value === null || value === ''
     })
     if (missing) {
@@ -599,15 +610,21 @@ function BottomBar({
 
   return (
     <div className="bottom-bar">
-      {running ? (
-        <button className="bottom-btn bottom-btn-stop" onClick={handleStop}>
-          <StopIcon />
-          {t('control.stop')}
-        </button>
+      {operationMode === 'monitor' ? (
+        running ? (
+          <button className="bottom-btn bottom-btn-stop" onClick={handleStop}>
+            <StopIcon />
+            {t('control.stop')}
+          </button>
+        ) : (
+          <button className="bottom-btn bottom-btn-play" onClick={handleStart}>
+            <PlayIcon />
+            {t('control.start')}
+          </button>
+        )
       ) : (
-        <button className="bottom-btn bottom-btn-play" onClick={handleStart}>
-          <PlayIcon />
-          {t('control.start')}
+        <button className="bottom-btn bottom-btn-operation" disabled>
+          请使用上方好友操作
         </button>
       )}
       <button
@@ -661,6 +678,7 @@ function SettingsWindow(): React.JSX.Element {
 
 function SettingsPanel() {
   const [visionApiKey, setVisionApiKey] = useState('')
+  const [customerApiUrl, setCustomerApiUrl] = useState('')
   const [testing, setTesting] = useState(false)
 
   useEffect(() => {
@@ -668,6 +686,7 @@ function SettingsPanel() {
       const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
       if (settings) {
         setVisionApiKey(settings.vision?.apiKey || '')
+        setCustomerApiUrl(settings.customerApiUrl || '')
       }
     }
 
@@ -676,7 +695,8 @@ function SettingsPanel() {
 
   const handleSaveVision = useCallback(async () => {
     const payload: Partial<AppSettings> = {
-      vision: { apiKey: visionApiKey }
+      vision: { apiKey: visionApiKey },
+      customerApiUrl
     }
     await window.electron?.invoke('settings:set', payload)
     await window.electron?.invoke('engine:updateConfig', {
@@ -685,7 +705,7 @@ function SettingsPanel() {
       vision: { apiKey: visionApiKey }
     })
     showToast(t('settings.saved'), 'success')
-  }, [visionApiKey])
+  }, [visionApiKey, customerApiUrl])
 
   const handleTestConnection = useCallback(async () => {
     if (!visionApiKey) return
@@ -741,6 +761,19 @@ function SettingsPanel() {
           <input className="form-input" value="https://ark.cn-beijing.volces.com/api/v3" disabled />
         </div>
 
+        <div className="form-group">
+          <label className="form-label">客户记录后端地址</label>
+          <input
+            className="form-input"
+            type="url"
+            value={customerApiUrl}
+            onChange={(e) => setCustomerApiUrl(e.target.value)}
+            placeholder="http://192.168.8.94:8500"
+            autoComplete="off"
+          />
+          <div className="form-hint">自动添加好友时的取号与状态回写地址（如 http://192.168.8.94:8500）</div>
+        </div>
+
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             className="btn btn-secondary"
@@ -774,7 +807,9 @@ function AgentPanel(): React.JSX.Element {
     try {
       const [settings, result] = await Promise.all([
         window.electron?.invoke('settings:getAll') as Promise<AppSettings | undefined>,
-        window.electron?.invoke(forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog') as Promise<ProviderHubResult>
+        window.electron?.invoke(
+          forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog'
+        ) as Promise<ProviderHubResult>
       ])
 
       const nextCatalog = mergeProviderCatalog(result?.catalog?.providers || [])
@@ -782,7 +817,10 @@ function AgentPanel(): React.JSX.Element {
       setCatalog(nextCatalog)
       setCurrentSettings(settings || null)
       setActiveId(nextActiveId)
-      setSelectedId((current) => current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || '')
+      setSelectedId(
+        (current) =>
+          current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || ''
+      )
       setProviderDrafts((prev) => ({
         ...prev,
         doubao: {
@@ -841,13 +879,11 @@ function AgentPanel(): React.JSX.Element {
       }
 
       if (provider.id === 'doubao') {
-        const { apiKey, ...providerConfig } = values
         await window.electron?.invoke('settings:set', {
-          vision: { apiKey },
           chatProvider: {
             manifestUrl: '',
             installed: null,
-            config: providerConfig
+            config: values
           }
         })
         const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
@@ -857,7 +893,10 @@ function AgentPanel(): React.JSX.Element {
         return true
       }
 
-      const installResult = await window.electron?.invoke('provider:installFromUrl', provider.manifestUrl)
+      const installResult = await window.electron?.invoke(
+        'provider:installFromUrl',
+        provider.manifestUrl
+      )
       if (!installResult?.success) {
         showToast(installResult?.error || '智能体安装失败', 'error')
         return false
@@ -1071,7 +1110,11 @@ function getProviderValues(
     return {
       ...defaults,
       ...(settings?.chatProvider.installed ? {} : settings?.chatProvider.config || {}),
-      apiKey: drafts.doubao?.apiKey || settings?.vision.apiKey || '',
+      apiKey:
+        drafts.doubao?.apiKey ||
+        settings?.chatProvider.config?.apiKey ||
+        settings?.vision.apiKey ||
+        '',
       ...(drafts.doubao || {})
     }
   }

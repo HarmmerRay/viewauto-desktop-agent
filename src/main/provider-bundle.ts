@@ -182,30 +182,9 @@ export async function getBuiltinDoubaoManifestRaw(): Promise<ProviderBundleManif
   }
 }
 
-/**
- * 拿到对外暴露的内置 doubao manifest：
- * - 移除 `apiKey` 字段（与视觉密钥共享，不需要用户重复填写）
- * - 同步从 required 列表里移除 apiKey
- */
+/** 内置 Provider 的 UI 配置与运行时配置保持一致，允许独立填写回复模型密钥。 */
 export async function getBuiltinDoubaoManifestForUi(): Promise<ProviderBundleManifest | null> {
-  const raw = await getBuiltinDoubaoManifestRaw()
-  if (!raw) return null
-
-  const properties: Record<string, ProviderSchemaField> = {}
-  for (const [key, field] of Object.entries(raw.configSchema.properties)) {
-    if (key === 'apiKey') continue
-    properties[key] = field
-  }
-  const required = (raw.configSchema.required || []).filter((k) => k !== 'apiKey')
-
-  return {
-    ...raw,
-    configSchema: {
-      type: 'object',
-      properties,
-      required
-    }
-  }
+  return getBuiltinDoubaoManifestRaw()
 }
 
 /** 内置 doubao 的虚拟 installed 描述（用于 provider:getInstalled 的回退） */

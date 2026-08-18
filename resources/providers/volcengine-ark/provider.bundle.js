@@ -27,9 +27,9 @@ export function createProvider(context) {
         return
       }
 
-      const apiKey = providerConfig.apiKey
+      const apiKey = String(providerConfig.apiKey || '').trim()
       if (!apiKey) {
-        yield { type: 'error', error: '聊天服务缺少接口密钥' }
+        yield { type: 'error', error: '回复模型缺少 API Key' }
         return
       }
 
@@ -45,6 +45,7 @@ export function createProvider(context) {
         const reply = await requestReply({
           screenshot: input.screenshot,
           apiKey,
+          baseURL: providerConfig.baseURL || DEFAULT_BASE_URL,
           model: providerConfig.model || DEFAULT_MODEL,
           systemPrompt: (providerConfig.systemPrompt || DEFAULT_PROMPT) + memorySection
         })
@@ -60,13 +61,13 @@ export function createProvider(context) {
         if (context && context.host && typeof context.host.log === 'function') {
           context.host.log(`provider error: ${message}`)
         }
-        yield { type: 'error', error: message || '聊天服务调用失败' }
+        yield { type: 'error', error: message || '回复模型调用失败' }
       }
     }
   }
 }
 
-async function requestReply({ screenshot, apiKey, model, systemPrompt }) {
+async function requestReply({ screenshot, apiKey, baseURL, model, systemPrompt }) {
   const body = {
     model,
     messages: [
@@ -79,27 +80,61 @@ async function requestReply({ screenshot, apiKey, model, systemPrompt }) {
         ]
       }
     ],
-    thinking: { type: 'disabled' },
     stream: false
   }
 
-  const response = await fetch(`${DEFAULT_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30_000)
+  let response
+  try {
+    response = await fetch(buildChatCompletionsUrl(baseURL), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    })
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error('回复模型请求超时（30 秒）')
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
 
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status} ${response.statusText}`)
+    const errorText = await response.text().catch(() => '')
+    throw new Error(
+      `API request failed: ${response.status} ${response.statusText}${errorText ? ` - ${errorText.slice(0, 300)}` : ''}`
+    )
   }
 
   const json = await response.json()
-  return json && json.choices && json.choices[0] && json.choices[0].message
-    ? json.choices[0].message.content || ''
+  return extractResponseText(json)
+}
+
+function buildChatCompletionsUrl(baseURL) {
+  const normalized = String(baseURL || DEFAULT_BASE_URL).trim().replace(/\/+$/, '')
+  if (!normalized) return `${DEFAULT_BASE_URL}/chat/completions`
+  return normalized.endsWith('/chat/completions')
+    ? normalized
+    : `${normalized}/chat/completions`
+}
+
+function extractResponseText(json) {
+  const content = json && json.choices && json.choices[0] && json.choices[0].message
+    ? json.choices[0].message.content
     : ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+      .join('')
+  }
+  return ''
 }
 
 // 工作记忆注入：把运行时下发的经验卡片拼成 system prompt 附加段

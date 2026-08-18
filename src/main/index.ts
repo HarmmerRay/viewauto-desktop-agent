@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, desktopCapturer } from 'electron'
+﻿import { app, shell, BrowserWindow, ipcMain, desktopCapturer } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -39,6 +39,18 @@ import {
   TraceRecorder
 } from '../core/trace/trace-recorder'
 import { TraceStepInput } from '../core/trace/trace-types'
+import { WechatFriendAutomation } from '../core/wechat-friend-automation'
+import {
+  AddWechatFriendRequest,
+  WechatFriendAddMode,
+  WechatFriendAutoResult,
+  WechatFriendCustomer,
+  WechatFriendOperationStatus
+} from '../core/wechat-friend-types'
+import {
+  fetchNextPendingCustomer,
+  updateCustomerStatus
+} from '../core/wechat-friend-api'
 import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-store'
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
@@ -62,6 +74,8 @@ interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  // 客户记录后端地址（自动添加好友的取号与状态回写用）
+  customerApiUrl: string
   // 默认抓取策略（仅当 appType 没有 per-app 覆盖时生效）
   defaultCaptureStrategy: CaptureStrategy
   // 每个 appType 独立保存的策略 + 框选区域
@@ -130,6 +144,7 @@ const settingsStore = new StoreClass({
       installed: null,
       config: {}
     },
+    customerApiUrl: 'http://192.168.8.94:8500',
     defaultCaptureStrategy: 'auto',
     capture: {}
   }
@@ -137,6 +152,9 @@ const settingsStore = new StoreClass({
 
 let runtime: RuntimeHost<ReturnType<typeof createInitialGenericChannelState>> | null = null
 let runtimeDevice: DesktopDevice | null = null
+let wechatFriendAutomation: WechatFriendAutomation | null = null
+let wechatFriendStatus: WechatFriendOperationStatus = { stage: 'idle' }
+let wechatFriendStopRequested = false
 let settingsWindow: BrowserWindow | null = null
 let memoryWindow: BrowserWindow | null = null
 
@@ -160,6 +178,32 @@ function getExperienceStore(): ExperienceStore {
     experienceStoreInstance = new ExperienceStore(join(worktraceBaseDir(), 'memory', 'cards.json'))
   }
   return experienceStoreInstance
+}
+
+function broadcastToRenderers(channel: string, payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload)
+  }
+}
+
+function recordAndBroadcastTrace(input: TraceStepInput): void {
+  const step = getTraceRecorder().record(input)
+  if (!step) return
+
+  const refs = step.reasoning?.memoryRefs
+  if (step.phase === 'act' && step.action?.kind === 'send' && refs?.length) {
+    getExperienceStore().recordUsage(refs, step.outcome?.status === 'ok')
+  }
+  broadcastToRenderers('trace:step', { sessionId: step.sessionId, step })
+}
+
+function updateWechatFriendStatus(status: WechatFriendOperationStatus): void {
+  wechatFriendStatus = status
+  broadcastToRenderers('wechatFriend:state', status)
+}
+
+function logWechatFriend(type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void {
+  broadcastToRenderers('engine:log', { type, content })
 }
 
 function createWindow(): void {
@@ -458,7 +502,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('settings:set', async (_event, data: Record<string, any>) => {
     const current = normalizeSettings(settingsStore.store)
-    const next = {
+    const next = normalizeSettings({
       ...current,
       ...data,
       vision: {
@@ -477,7 +521,7 @@ app.whenReady().then(async () => {
         ...current.capture,
         ...(data.capture || {})
       }
-    } satisfies AppSettings
+    })
 
     settingsStore.set(next as any)
     return { success: true }
@@ -649,6 +693,347 @@ app.whenReady().then(async () => {
     return { success: getExperienceStore().setEnabled(cardId, enabled === true) }
   })
 
+  // ── 微信扩展操作：添加好友（准备与最终发送分成两段） ──
+  ipcMain.handle('wechatFriend:getStatus', async () => wechatFriendStatus)
+
+  ipcMain.handle('wechatFriend:prepare', async (_event, request: AddWechatFriendRequest) => {
+    if (runtime?.isRunning()) {
+      return { success: false, stage: 'failed', error: '请先停止消息监控，再执行添加好友' }
+    }
+    if (wechatFriendStatus.stage === 'preparing' || wechatFriendStatus.stage === 'sending') {
+      return { success: false, stage: wechatFriendStatus.stage, error: '已有好友操作正在执行' }
+    }
+    if (wechatFriendStatus.stage === 'awaiting_confirmation') {
+      return {
+        success: false,
+        stage: 'awaiting_confirmation',
+        error: '已有好友申请等待确认，请先发送或取消'
+      }
+    }
+
+    const settings = normalizeSettings(settingsStore.store)
+    if (!settings.vision.apiKey) {
+      return { success: false, stage: 'failed', error: '请先在设置中填写视觉接口密钥' }
+    }
+
+    const account = String(request?.account || '').trim()
+    const recorder = getTraceRecorder()
+    const session = recorder.startSession({
+      appType: 'wechat',
+      engineVersion: app.getVersion(),
+      providerId: 'wechat-friend-operation',
+      model: FIXED_ARK_MODEL
+    })
+    updateWechatFriendStatus({ stage: 'preparing', account, sessionId: session.sessionId })
+
+    const client = new AIClient({
+      apiKey: settings.vision.apiKey,
+      model: FIXED_ARK_MODEL,
+      baseURL: FIXED_ARK_BASE_URL
+    })
+    const automation = new WechatFriendAutomation(client, {
+      log: logWechatFriend,
+      trace: recordAndBroadcastTrace
+    })
+    wechatFriendAutomation = automation
+
+    try {
+      await automation.prepare(request)
+      updateWechatFriendStatus({
+        stage: 'awaiting_confirmation',
+        account,
+        sessionId: session.sessionId,
+        detail: '申请信息已填写，等待确认发送'
+      })
+      return { success: true, stage: 'awaiting_confirmation' }
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      recordAndBroadcastTrace({
+        phase: 'verify',
+        summary: '添加微信好友准备失败',
+        outcome: { status: 'fail', detail: message }
+      })
+      recorder.endSession()
+      wechatFriendAutomation = null
+      updateWechatFriendStatus({ stage: 'failed', account, detail: message })
+      logWechatFriend('error', `添加好友失败：${message}`)
+      return { success: false, stage: 'failed', error: message }
+    }
+  })
+
+  ipcMain.handle('wechatFriend:confirm', async () => {
+    if (!wechatFriendAutomation || wechatFriendStatus.stage !== 'awaiting_confirmation') {
+      return { success: false, stage: 'failed', error: '没有等待确认的好友申请' }
+    }
+
+    const account = wechatFriendStatus.account
+    updateWechatFriendStatus({
+      ...wechatFriendStatus,
+      stage: 'sending',
+      detail: '正在发送好友申请'
+    })
+    try {
+      await wechatFriendAutomation.confirm()
+      getTraceRecorder().endSession()
+      wechatFriendAutomation = null
+      updateWechatFriendStatus({ stage: 'completed', account, detail: '好友申请已发送' })
+      return { success: true, stage: 'completed' }
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      recordAndBroadcastTrace({
+        phase: 'verify',
+        summary: '发送微信好友申请失败',
+        outcome: { status: 'fail', detail: message }
+      })
+      getTraceRecorder().endSession()
+      wechatFriendAutomation = null
+      updateWechatFriendStatus({ stage: 'failed', account, detail: message })
+      logWechatFriend('error', `发送好友申请失败：${message}`)
+      return { success: false, stage: 'failed', error: message }
+    }
+  })
+
+  ipcMain.handle('wechatFriend:cancel', async () => {
+    if (wechatFriendStatus.stage === 'awaiting_confirmation') {
+      wechatFriendAutomation?.cancel()
+      recordAndBroadcastTrace({
+        actor: 'human',
+        phase: 'verify',
+        summary: '人工取消发送微信好友申请',
+        action: { kind: 'wait', payload: 'cancelled_before_send' },
+        outcome: { status: 'skip' }
+      })
+      getTraceRecorder().endSession()
+    }
+    wechatFriendAutomation = null
+    updateWechatFriendStatus({ stage: 'cancelled', account: wechatFriendStatus.account })
+    logWechatFriend('skip', '已取消本次好友申请；微信窗口中已填写内容不会自动清除')
+    return { success: true, stage: 'cancelled' }
+  })
+
+  // ── 微信扩展操作：全自动添加好友（取号 → 添加 → 写库） ──
+
+  /**
+   * 添加单个待添加客户：搜索、填写申请、发送并回写数据库。
+   * 每次调用独立开启/结束一个 trace 会话；失败时清理自动化并抛错，由调用方决定是否继续。
+   */
+  async function autoAddOneCustomer(
+    customer: WechatFriendCustomer,
+    verificationMessage: string,
+    client: AIClient,
+    settings: AppSettings
+  ): Promise<{ wechatId: string | null }> {
+    const account = customer.wechat
+    const remark = `${customer.name}-${customer.channel}`
+    const recorder = getTraceRecorder()
+    const session = recorder.startSession({
+      appType: 'wechat',
+      engineVersion: app.getVersion(),
+      providerId: 'wechat-friend-auto-operation',
+      model: FIXED_ARK_MODEL
+    })
+    updateWechatFriendStatus({ stage: 'preparing', account, sessionId: session.sessionId })
+
+    const automation = new WechatFriendAutomation(client, {
+      log: logWechatFriend,
+      trace: recordAndBroadcastTrace
+    })
+    wechatFriendAutomation = automation
+
+    try {
+      logWechatFriend(
+        'thinking',
+        `取到待添加客户：${customer.name}（微信号 ${account}，渠道 ${customer.channel}）`
+      )
+      updateWechatFriendStatus({
+        stage: 'sending',
+        account,
+        sessionId: session.sessionId,
+        detail: '正在自动添加并发送申请'
+      })
+
+      const { wechatId } = await automation.run({
+        account,
+        verificationMessage: verificationMessage || undefined,
+        remark
+      })
+
+      try {
+        await updateCustomerStatus(customer.id, '已发申请', wechatId, settings.customerApiUrl)
+        logWechatFriend(
+          'reply',
+          `已回写客户 ${customer.name} 状态为「已发申请」${wechatId ? `（added_by_wechat=${wechatId}）` : ''}`
+        )
+      } catch (error: any) {
+        logWechatFriend(
+          'error',
+          `好友申请已发送，但回写数据库失败：${error?.message || String(error)}`
+        )
+      }
+
+      recorder.endSession()
+      wechatFriendAutomation = null
+      return { wechatId }
+    } catch (error) {
+      recorder.endSession()
+      wechatFriendAutomation = null
+      throw error
+    }
+  }
+
+  ipcMain.handle(
+    'wechatFriend:autoAdd',
+    async (
+      _event,
+      input: { verificationMessage?: string; mode?: WechatFriendAddMode }
+    ): Promise<WechatFriendAutoResult> => {
+      if (runtime?.isRunning()) {
+        return { success: false, stage: 'failed', error: '请先停止消息监控，再执行添加好友' }
+      }
+      if (
+        wechatFriendStatus.stage === 'preparing' ||
+        wechatFriendStatus.stage === 'sending' ||
+        wechatFriendStatus.stage === 'awaiting_confirmation'
+      ) {
+        return {
+          success: false,
+          stage: wechatFriendStatus.stage,
+          error: '已有好友操作正在执行'
+        }
+      }
+
+      const settings = normalizeSettings(settingsStore.store)
+      if (!settings.vision.apiKey) {
+        return { success: false, stage: 'failed', error: '请先在设置中填写视觉接口密钥' }
+      }
+      const mode: WechatFriendAddMode = input?.mode === 'continuous' ? 'continuous' : 'single'
+      const verificationMessage =
+        typeof input?.verificationMessage === 'string' ? input.verificationMessage.trim() : ''
+
+      const client = new AIClient({
+        apiKey: settings.vision.apiKey,
+        model: FIXED_ARK_MODEL,
+        baseURL: FIXED_ARK_BASE_URL
+      })
+
+      wechatFriendStopRequested = false
+      let addedCount = 0
+      let skippedCount = 0
+      let lastCustomer: WechatFriendCustomer | undefined
+      let lastWechatId: string | null = null
+
+      try {
+        while (true) {
+          if (wechatFriendStopRequested) break
+
+          // 取号
+          let customer: WechatFriendCustomer | null
+          try {
+            customer = await fetchNextPendingCustomer(settings.customerApiUrl)
+          } catch (error: any) {
+            // 已添加过客户时，取号失败不中断整批，仅记录并结束本轮。
+            if (addedCount > 0) {
+              logWechatFriend('error', `继续取号失败，已停止：${error?.message || String(error)}`)
+              break
+            }
+            return { success: false, stage: 'failed', error: error?.message || String(error) }
+          }
+          if (!customer) break
+
+          try {
+            const { wechatId } = await autoAddOneCustomer(
+              customer,
+              verificationMessage,
+              client,
+              settings
+            )
+            addedCount += 1
+            lastCustomer = customer
+            lastWechatId = wechatId
+          } catch (error: any) {
+            // 用户点击“停止添加”会立即中断当前自动化，属于正常结束而非失败。
+            if (error?.name === 'WechatFriendStoppedError') break
+
+            // 微信提示无法找到该用户：标记为跳过，继续后续账号，不中断整批。
+            if (error?.name === 'WechatFriendUserNotFoundError') {
+              try {
+                await updateCustomerStatus(customer.id, '跳过', null, settings.customerApiUrl)
+                logWechatFriend(
+                  'skip',
+                  `客户 ${customer.name}（微信号 ${customer.wechat}）无法找到该用户，已标记为跳过`
+                )
+              } catch (updateError: any) {
+                logWechatFriend(
+                  'error',
+                  `客户 ${customer.name} 标记为跳过失败：${updateError?.message || String(updateError)}`
+                )
+              }
+              skippedCount += 1
+              if (mode === 'single') break
+              continue
+            }
+
+            throw error
+          }
+
+          // 单次模式只处理一个客户。
+          if (mode === 'single') break
+        }
+
+        const stopped = wechatFriendStopRequested
+        const parts: string[] = []
+        if (addedCount > 0) parts.push(`已发送 ${addedCount} 个好友申请`)
+        if (skippedCount > 0) parts.push(`跳过 ${skippedCount} 个无法找到的用户`)
+        const detail =
+          parts.length > 0
+            ? parts.join('，') + (stopped ? '（已停止）' : '')
+            : stopped
+              ? '已停止'
+              : '当前没有待添加的客户'
+        updateWechatFriendStatus({
+          stage: 'completed',
+          account: lastCustomer?.wechat,
+          detail
+        })
+        return {
+          success: true,
+          stage: 'completed',
+          customer: lastCustomer,
+          wechatId: lastWechatId,
+          addedCount,
+          skippedCount,
+          detail
+        }
+      } catch (error: any) {
+        const message = error?.message || String(error)
+        recordAndBroadcastTrace({
+          phase: 'verify',
+          summary: '自动添加微信好友失败',
+          outcome: { status: 'fail', detail: message }
+        })
+        getTraceRecorder().endSession()
+        wechatFriendAutomation = null
+        updateWechatFriendStatus({
+          stage: 'failed',
+          account: lastCustomer?.wechat,
+          detail: message
+        })
+        logWechatFriend('error', `自动添加好友失败：${message}`)
+        return { success: false, stage: 'failed', customer: lastCustomer, error: message }
+      }
+    }
+  )
+
+  // 立即中断当前添加流程：设置停止标志并中断正在执行的自动化。
+  ipcMain.handle('wechatFriend:stop', async () => {
+    if (wechatFriendStatus.stage === 'preparing' || wechatFriendStatus.stage === 'sending') {
+      wechatFriendStopRequested = true
+      wechatFriendAutomation?.stop()
+      logWechatFriend('skip', '已请求立即停止，正在中断当前操作')
+    }
+    return { success: true }
+  })
+
   // ── Runtime / Session IPC（沿用 legacy engine:* 通道名） ──
   ipcMain.handle('engine:start', async (_event, config) => {
     const result = await startEngineCore(config)
@@ -791,45 +1176,60 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopSkillServer()
+  wechatFriendAutomation?.cancel()
+  wechatFriendAutomation = null
+  getTraceRecorder().endSession()
 })
 
 // ── 引擎启动 / 暂停核心逻辑（IPC 与 Skill HTTP Server 共用） ──
 
 async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
+  if (
+    wechatFriendStatus.stage === 'preparing' ||
+    wechatFriendStatus.stage === 'awaiting_confirmation' ||
+    wechatFriendStatus.stage === 'sending'
+  ) {
+    return {
+      ok: false,
+      reason: 'friend_operation_active',
+      message: '请先完成或取消添加好友操作'
+    }
+  }
   if (runtime?.isRunning()) {
     return { ok: false, reason: 'already_running', message: '引擎已在运行中' }
   }
 
   try {
     const settings = normalizeSettings(rawConfig || settingsStore.store)
-    const appType: AppType = settings.appType || 'wechat'
+    const appType: AppType = 'wechat'
     const startupStrategy = resolveSettingsStrategy(appType, settings)
-    const providerNeedsVisionKey =
-      !settings.chatProvider.installed ||
-      settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
-    const needsVisionKey = startupStrategy === 'vlm' || providerNeedsVisionKey
+    const needsVisionKey = startupStrategy === 'vlm'
 
     if (needsVisionKey && !settings.vision.apiKey) {
       return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
     }
 
-    // 没有自定义 provider → 走内置 doubao，使用视觉密钥
+    // 回复模型与视觉定位模型使用独立配置；仅为旧配置兼容，在回复密钥为空时回退到视觉密钥。
     let provider
     if (!settings.chatProvider.installed) {
-      const loaded = await loadBuiltinDoubaoProvider({
+      const effectiveConfig = {
         ...settings.chatProvider.config,
-        apiKey: settings.vision.apiKey
-      })
+        apiKey: settings.chatProvider.config?.apiKey || settings.vision.apiKey
+      }
+      const loaded = await loadBuiltinDoubaoProvider(effectiveConfig)
       provider = loaded.provider
     } else {
       const installedManifest = await getInstalledProviderManifest(settings.chatProvider.installed)
-      // doubao（无论是用户主动装的还是内置的）apiKey 由视觉密钥共享提供，不强校验
       const isDoubao = settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
-      const required = (installedManifest?.configSchema?.required || []).filter(
-        (key) => !(isDoubao && key === 'apiKey')
-      )
+      const effectiveConfig = isDoubao
+        ? {
+            ...settings.chatProvider.config,
+            apiKey: settings.chatProvider.config?.apiKey || settings.vision.apiKey
+          }
+        : settings.chatProvider.config
+      const required = installedManifest?.configSchema?.required || []
       const missing = required.find((key) => {
-        const value = settings.chatProvider.config?.[key]
+        const value = effectiveConfig?.[key]
         return value === undefined || value === null || value === ''
       })
       if (missing) {
@@ -839,10 +1239,6 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
           message: `缺少必填配置: ${missing}`
         }
       }
-
-      const effectiveConfig = isDoubao
-        ? { ...settings.chatProvider.config, apiKey: settings.vision.apiKey }
-        : settings.chatProvider.config
 
       const loaded = await loadInstalledProvider(settings.chatProvider.installed, effectiveConfig)
       provider = loaded.provider
@@ -1045,21 +1441,13 @@ const skillEngineController: SkillEngineController = {
 // In this file you can include the rest of your app's specific main process
 // code. You can also put them in separate files and require them here.
 
-const VALID_APP_TYPES: AppType[] = [
-  'wechat',
-  'wework',
-  'dingtalk',
-  'lark',
-  'slack',
-  'telegram',
-  'generic'
-]
+// 二创版本仅开放微信。保留 AppType 联合类型是为了降低后续 Pull 上游时的冲突，
+// 但所有外部配置在进入运行时前都会被强制归一化为 wechat。
+const VALID_APP_TYPES: AppType[] = ['wechat']
 const VALID_CAPTURE_STRATEGIES: CaptureStrategy[] = ['auto', 'vlm', 'box-select']
 
-function coerceAppType(raw: unknown): AppType {
-  return typeof raw === 'string' && (VALID_APP_TYPES as string[]).includes(raw)
-    ? (raw as AppType)
-    : 'wechat'
+function coerceAppType(_raw: unknown): AppType {
+  return 'wechat'
 }
 
 function coerceStrategy(raw: unknown, fallback: CaptureStrategy = 'auto'): CaptureStrategy {
@@ -1143,6 +1531,10 @@ function normalizeSettings(raw: any): AppSettings {
       installed: raw?.chatProvider?.installed || null,
       config: rawProviderConfig
     },
+    customerApiUrl:
+      typeof raw?.customerApiUrl === 'string' && raw.customerApiUrl.trim()
+        ? raw.customerApiUrl.trim()
+        : 'http://192.168.8.94:8500',
     defaultCaptureStrategy: coerceStrategy(raw?.defaultCaptureStrategy, 'auto'),
     capture: normalizeCapture(raw?.capture)
   }

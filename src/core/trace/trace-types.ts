@@ -1,4 +1,4 @@
-// src/core/trace/trace-types.ts
+﻿// src/core/trace/trace-types.ts
 // Work-trace 数据模型 — 「学」能力的地基
 //
 // 每次引擎执行的每个有意义步骤都落成一条 TraceStep（五元组：时间戳 / 界面状态 /
@@ -10,7 +10,7 @@ import { AppType } from '../rpa/types'
 export type TraceActor = 'agent' | 'human'
 export type TracePhase = 'observe' | 'think' | 'act' | 'verify'
 export type TraceOutcomeStatus = 'ok' | 'fail' | 'skip'
-export type TraceActionKind = 'click' | 'send' | 'measure' | 'wait'
+export type TraceActionKind = 'click' | 'input' | 'send' | 'friend_request' | 'measure' | 'wait'
 
 export interface TraceSessionMeta {
   sessionId: string

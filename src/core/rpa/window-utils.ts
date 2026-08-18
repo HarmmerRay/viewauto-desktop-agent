@@ -26,12 +26,15 @@ async function getOpenWindowsSafe(): Promise<any[]> {
 }
 
 export function matchWechatType(name: string, appType: AppType) {
+  const normalizedName = String(name || '').replace(/^\u200e/, '').trim().toLowerCase()
   if ((appType as string) === 'whatsapp') {
-    return ['‎WhatsApp', '‎WhatsApp.app', '‎WhatsApp.exe', 'WhatsApp'].includes(name)
+    return ['whatsapp', 'whatsapp.app', 'whatsapp.exe'].includes(normalizedName)
   }
   const wechatName =
-    appType === 'wechat' ? ['微信', '微信.app', 'WeChat'] : ['企业微信', '企业微信.app']
-  return wechatName.includes(name)
+    appType === 'wechat'
+      ? ['微信', '微信.app', 'wechat', 'weixin']
+      : ['企业微信', '企业微信.app', 'wecom', 'wxwork']
+  return wechatName.includes(normalizedName)
 }
 
 function getWechatWindow(appType: AppType, windows: any[]): any {
@@ -70,13 +73,52 @@ type PlatformWindow = {
 async function getWechatWindowInWin(appType: AppType): Promise<PlatformWindow | null> {
   try {
     const { windowManager } = require('node-window-manager')
-    let activeWechatWindow = windowManager.getActiveWindow()
-    if (activeWechatWindow && matchWechatType(activeWechatWindow.getTitle(), appType)) {
-      return activeWechatWindow
+
+    // 不要直接信任 getActiveWindow()：填写验证消息 / 备注时，当前激活窗口往往是
+    // “添加朋友”“朋友验证”等独立弹窗（标题也可能叫“微信”）。若把弹窗当成主窗口，
+    // 后续截图 bounds 会指向弹窗而非主窗口，主窗口和搜索框反而被漏掉。
+    // 这里枚举所有标题匹配的窗口，优先选“不被其它窗口拥有”且尺寸最大的主窗口。
+    const appWindows = (windowManager.getWindows() || []).filter((window: any) =>
+      matchWechatType(window.getTitle(), appType)
+    )
+
+    // 主窗口通常不被任何窗口拥有（getOwner 为空），弹窗的 owner 会指向主窗口。
+    const notOwned = appWindows.filter((window: any) => !getWindowOwnerId(window))
+    const candidatePool = notOwned.length > 0 ? notOwned : appWindows
+
+    // 主窗口通常是尺寸最大的那个，先按面积降序，避免误选到大的独立弹窗。
+    const sorted = [...candidatePool].sort((a: any, b: any) => {
+      const ab = getWindowBounds(a)
+      const bb = getWindowBounds(b)
+      const areaA = (ab?.width ?? 0) * (ab?.height ?? 0)
+      const areaB = (bb?.width ?? 0) * (bb?.height ?? 0)
+      return areaB - areaA
+    })
+
+    const foundWindow =
+      sorted.find((window: any) => {
+        const bounds = getWindowBounds(window)
+        return window.isVisible() && validateWindowBounds(bounds) && !isMinimizedWindowBounds(bounds)
+      }) ||
+      sorted.find((window: any) => {
+        const bounds = getWindowBounds(window)
+        return validateWindowBounds(bounds) && !isMinimizedWindowBounds(bounds)
+      }) ||
+      sorted.find((window: any) => window.isVisible())
+
+    if (!foundWindow) return null
+
+    // Windows reports a minimized window at roughly (-32000, -32000), while closing WeChat
+    // normally hides its main window in the tray. Both states produce a white/empty capture.
+    const bounds = getWindowBounds(foundWindow)
+    if (!foundWindow.isVisible() || isMinimizedWindowBounds(bounds)) {
+      foundWindow.restore?.()
+      foundWindow.show?.()
+      foundWindow.bringToTop?.()
+      await new Promise((resolve) => setTimeout(resolve, 350))
     }
-    const foundWindow = windowManager.getWindows()
-      ?.find((window: any) => matchWechatType(window.getTitle(), appType) && window.isVisible())
-    return foundWindow || null
+
+    return foundWindow
   } catch (err: any) {
     console.error('[window-utils] getWechatWindowInWin error:', err.message)
     return null
@@ -106,6 +148,21 @@ function getWindowBounds(window: PlatformWindow): {
   return null
 }
 
+/** 返回窗口的 owner 窗口 id。主窗口通常没有 owner（返回 0），弹窗的 owner 指向主窗口。 */
+function getWindowOwnerId(window: PlatformWindow): number {
+  try {
+    return Number((window as any)?.getOwner?.()?.id) || 0
+  } catch {
+    return 0
+  }
+}
+
+function isMinimizedWindowBounds(
+  bounds: { x?: number; y?: number; width?: number; height?: number } | null
+): boolean {
+  return Boolean(bounds && ((bounds.x ?? 0) <= -30000 || (bounds.y ?? 0) <= -30000))
+}
+
 function validateWindowBounds(bounds: { x?: number; y?: number; width?: number; height?: number } | null): bounds is { x: number; y: number; width: number; height: number } {
   if (!bounds) return false
   if (bounds.x === undefined || bounds.y === undefined || !bounds.width || !bounds.height ||
@@ -124,15 +181,19 @@ const WINDOW_INFO_CACHE_DURATION = 5000 // 5 seconds cache
 const wechatWindowInfoCache = new Map<AppType, WechatWindowInfoCache>()
 const wechatWindowInfoPendingPromises = new Map<AppType, Promise<any>>()
 
-export async function getWechatWindowInfo(appType: AppType) {
+export async function getWechatWindowInfo(
+  appType: AppType,
+  options: { bypassCache?: boolean } = {}
+) {
+  const bypassCache = options.bypassCache ?? false
   const cached = wechatWindowInfoCache.get(appType)
   const now = Date.now()
-  if (cached && now - cached.timestamp < WINDOW_INFO_CACHE_DURATION) {
+  if (!bypassCache && cached && now - cached.timestamp < WINDOW_INFO_CACHE_DURATION) {
     return cached.result
   }
 
   const pendingPromise = wechatWindowInfoPendingPromises.get(appType)
-  if (pendingPromise) return pendingPromise
+  if (!bypassCache && pendingPromise) return pendingPromise
 
   const queryPromise = (async () => {
     try {
