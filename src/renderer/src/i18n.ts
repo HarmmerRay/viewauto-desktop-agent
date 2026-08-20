@@ -6,7 +6,7 @@ export type Locale = 'zh' | 'en'
 const translations = {
   zh: {
     // Header
-    'app.title': 'SightFlow Desktop',
+    'app.title': 'RAuto',
     'app.version': 'v0.1.0',
 
     // Tabs
@@ -17,9 +17,12 @@ const translations = {
     'control.status': '引擎状态',
     'status.idle': '待命',
     'status.running': '运行中',
+    'status.monitoring': '正在监控',
     'status.error': '异常',
     'control.start': '启动引擎',
     'control.stop': '停止引擎',
+    'control.start.monitor': '开始监控',
+    'control.stop.monitor': '停止监控',
     'control.start.novisionkey': '请先在设置页填写视觉接口密钥',
     'control.start.noprovider': '请先安装聊天服务',
     'control.start.missingProviderField': '聊天服务缺少必填项',
@@ -67,7 +70,7 @@ const translations = {
     'toast.startFailed': '启动失败',
   },
   en: {
-    'app.title': 'SightFlow Desktop',
+    'app.title': 'RAuto',
     'app.version': 'v0.1.0',
 
     'tab.control': 'Control',
@@ -76,9 +79,12 @@ const translations = {
     'control.status': 'Engine Status',
     'status.idle': 'Idle',
     'status.running': 'Running',
+    'status.monitoring': 'Monitoring',
     'status.error': 'Error',
     'control.start': 'Start Engine',
     'control.stop': 'Stop Engine',
+    'control.start.monitor': 'Start Monitor',
+    'control.stop.monitor': 'Stop Monitor',
     'control.start.novisionkey': 'Please set Vision API Key first',
     'control.start.noprovider': 'Please install a chat provider first',
     'control.start.missingProviderField': 'Missing required provider field',

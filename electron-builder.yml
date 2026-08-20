@@ -1,5 +1,5 @@
-appId: com.sightflow.desktop
-productName: SightFlow
+appId: com.rauto.desktop
+productName: RAuto
 directories:
   buildResources: build
 files:
@@ -12,7 +12,7 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: SightFlow
+  executableName: RAuto
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

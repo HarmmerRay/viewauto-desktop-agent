@@ -1,7 +1,8 @@
 {
-  "name": "sightflow-desktop-agent",
+  "name": "rauto-desktop-agent",
   "version": "1.0.0",
-  "description": "SightFlow Desktop Agent - AI-powered cross-platform desktop RPA client based on Electron and VLM",
+  "productName": "RAuto",
+  "description": "RAuto Desktop Agent - AI-powered cross-platform desktop RPA client based on Electron and VLM",
   "main": "./out/main/index.js",
   "author": "sightflow-dev",
   "license": "Apache-2.0",

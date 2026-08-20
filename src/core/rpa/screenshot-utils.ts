@@ -260,6 +260,16 @@ function unionBounds(left: Electron.Rectangle, right: Electron.Rectangle): Elect
   return { x, y, width: maxX - x, height: maxY - y }
 }
 
+/** 两个矩形是否相交（含边缘相邻）。用于判断独立弹窗是否叠加在主窗口上方。 */
+function rectOverlaps(a: Electron.Rectangle, b: Electron.Rectangle): boolean {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  )
+}
+
 function clampBoundsToDisplay(
   bounds: Electron.Rectangle,
   displayBounds: Electron.Rectangle
@@ -359,11 +369,16 @@ function getWechatCompositeBounds(windowCoreResult: any): Electron.Rectangle {
     let composite = { ...mainBounds }
     const included = new Set<number>()
 
-    // 微信的“添加朋友”“朋友验证”等弹窗是独立 HWND，可能离主窗口较远或运行在辅助进程。
-    // 直接把所有微信相关窗口并入合成区域，确保 screen 模式截图能覆盖这些弹窗。
+    // 微信的“添加朋友”“朋友验证”等弹窗虽是独立 HWND，但都是模态弹窗：要么被主窗口拥有
+    // （GWLP_HWNDPARENT 指向主窗口），要么叠加在主窗口上方。如果把所有微信相关窗口
+    // （含远离主窗口的小程序/视频号等 WeChatAppEx.exe 独立窗口）一并并入合成区域，会导致
+    // 截图面积过大、目标按钮被稀释，VLM 识别不准且浪费 token。这里只并入“被主窗口拥有”
+    // 或“与主窗口相交”的弹窗。
     candidates.forEach((candidate: any, index: number) => {
-      included.add(index)
-      composite = unionBounds(composite, candidate.bounds)
+      if (candidate.owned || rectOverlaps(mainBounds, candidate.bounds)) {
+        included.add(index)
+        composite = unionBounds(composite, candidate.bounds)
+      }
     })
 
     const display = screen.getDisplayMatching(mainBounds)

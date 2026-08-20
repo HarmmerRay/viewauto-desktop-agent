@@ -62,6 +62,19 @@ class WechatFriendUserNotFoundError extends Error {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * 判断窗口 bounds 是否处于最小化状态。
+ *
+ * Windows 会把最小化窗口报告在屏幕外约 (-32000, -32000) 的位置，通过检查 x/y 是否
+ * 远小于 0 即可识别最小化。这与 window-utils 中的 isMinimizedWindowBounds 逻辑一致。
+ */
+function isMinimizedBounds(
+  bounds?: { x?: number; y?: number; width?: number; height?: number } | null
+): boolean {
+  if (!bounds) return false
+  return (bounds.x ?? 0) <= -30000 || (bounds.y ?? 0) <= -30000
+}
+
+/**
  * 微信好友添加自动化。
  *
  * prepare 负责搜索帐号、打开资料页、填写验证信息，并停在最终“发送”按钮前；
@@ -313,20 +326,50 @@ export class WechatFriendAutomation {
   }
 
   /**
-   * 检测微信主窗口是否可操作。
+   * 检测并确保微信主窗口处于可操作的前台状态。
    *
-   * 与消息监控一致：只读取窗口当前实际打开的位置，不做任何置前/还原/移动操作。
-   * 之前这里无条件调用 restore()/show()/bringToTop()，会把最大化状态的微信窗口
-   * “还原”成固定尺寸和位置（restore() 即 ShowWindow SW_RESTORE，会取消最大化并
-   * 回到保存的位置），导致用户看到的窗口被强行固定到某个地方。现已移除。
-   *
-   * 窗口若确实处于最小化状态，getWechatWindowInfo 内部会做最小化还原（必要的兜底，
-   * 否则截图是空白），这与消息监控共用同一套逻辑。
+   * getWechatWindowInfo 内部已经负责识别主窗口并在最小化/隐藏到托盘时自动还原（带轮询
+   * 校验），这里不再重复还原，只做一次兜底确认：若窗口仍处于最小化或不可见，再尝试还原
+   * 一次并置前；若还失败则抛出明确错误提示用户手动打开，而不是静默地用空白截图继续跑。
+   * 注意只在检测到最小化/隐藏时才还原，避免把已最大化或正常状态的窗口误“还原”成固定尺寸。
    */
   private async focusWechatWindow(): Promise<void> {
     const info = await getWechatWindowInfo('wechat', { bypassCache: true })
     if (!info?.wechatWindow) throw new Error('未找到微信窗口，请先登录并打开微信主窗口')
-    await sleep(250)
+
+    const window = info.wechatWindow
+    const bounds = window.getBounds?.()
+    if (isMinimizedBounds(bounds) || !window.isVisible?.()) {
+      this.callbacks.log('thinking', '检测到微信窗口已最小化，正在自动还原窗口')
+      this.callbacks.trace({
+        phase: 'act',
+        summary: '还原最小化的微信窗口',
+        outcome: { status: 'skip', detail: '检测到窗口处于最小化或隐藏状态' }
+      })
+      try {
+        window.restore?.()
+        window.show?.()
+        window.bringToTop?.()
+      } catch (error) {
+        console.error('[focusWechatWindow] 还原微信窗口失败', error)
+      }
+      await sleep(600)
+    } else {
+      try {
+        window.bringToTop?.()
+      } catch (error) {
+        console.error('[focusWechatWindow] 置前微信窗口失败', error)
+      }
+    }
+
+    // 兜底校验：bounds 仍在屏幕外说明自动还原失败，直接报错提示用户，避免后续用错误的
+    // 坐标截图导致目标一直识别不到。
+    if (isMinimizedBounds(window.getBounds?.())) {
+      throw new Error('微信窗口已最小化且自动还原失败，请手动打开微信窗口后重试')
+    }
+
+    // 等待窗口内容渲染完成，避免截图仍为空白。
+    await sleep(300)
   }
 
   private async locateAndClick(
@@ -420,7 +463,7 @@ export class WechatFriendAutomation {
       try {
         addTarget = await this.locateTarget(
           '添加到通讯录按钮',
-          '请查看当前微信用户资料页或资料弹窗，定位“添加到通讯录”按钮。它通常是一个实心绿色（或品牌色）圆角按钮，上面有白色文字“添加到通讯录”，位于资料页下方。\n\n注意：资料页中可能还有“视频号”“公众号”“朋友圈”“更多信息”等入口卡片，它们不是“添加到通讯录”按钮，绝对不要定位或点击这些入口。只输出绿色“添加到通讯录”按钮内部可点击位置：<point>x,y</point>。如果资料页或弹窗仍在加载，输出 [WAITING]；如果界面明确表明对方已经是好友并只显示“发消息”，输出 [ALREADY_FRIEND]；如果界面明确显示“无法找到该用户”“查无此人”等提示（说明该账号不存在，而不是没有“添加到通讯录”按钮），输出 [USER_NOT_FOUND]；如果只是看不到“添加到通讯录”按钮但没有“无法找到该用户”提示，输出 [NOT_FOUND]。',
+          '请查看当前微信用户资料页或资料弹窗，定位“添加到通讯录”按钮。它通常是一个实心绿色（或品牌色）圆角按钮，上面有白色文字“添加到通讯录”，位于资料页下方。\n\n注意：资料页中可能还有“视频号”“公众号”“朋友圈”“更多信息”等入口卡片。这些入口通常带有封面缩略图、头像或图标，是卡片样式；而“添加到通讯录”是一个纯色（绿色）实心圆角按钮，上面只有白色文字、没有封面图。两者视觉差异明显，绝对不要把带图标的入口卡片当成按钮。只输出绿色“添加到通讯录”按钮内部可点击位置：<point>x,y</point>。如果资料页或弹窗仍在加载，输出 [WAITING]；如果界面明确表明对方已经是好友并只显示“发消息”，输出 [ALREADY_FRIEND]；如果界面明确显示“无法找到该用户”“查无此人”等提示（说明该账号不存在，而不是没有“添加到通讯录”按钮），输出 [USER_NOT_FOUND]；如果只是看不到“添加到通讯录”按钮但没有“无法找到该用户”提示，输出 [NOT_FOUND]。',
           { initialDelayMs: attempt === 1 ? 700 : 300, timeoutMs: 15000 }
         )
       } catch (error) {
@@ -468,15 +511,65 @@ export class WechatFriendAutomation {
     }
   }
 
-  /** 按 Esc 关闭当前弹出的无关弹窗（如视频号）。 */
+  /**
+   * 关闭当前弹出的无关弹窗（如视频号）。
+   *
+   * 视频号这类内嵌页面用 Esc 关不掉（Esc 只对普通模态弹窗生效），需要点击页面
+   * 左上角的“返回/关闭”按钮才能真正退出。这里先按 Esc 兜底普通弹窗，再用视觉
+   * 校验是否已经退出，未退出则定位并点击返回/关闭按钮，最多重试 3 次。
+   */
   private async closeWechatPopup(): Promise<void> {
     const robot = getRobot()
-    if (!robot) return
+    if (robot) {
+      try {
+        robot.keyTap('escape')
+        await sleep(500)
+      } catch (error) {
+        console.error('[closeWechatPopup] 关闭弹窗失败', error)
+      }
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      this.assertNotStopped()
+      if (await this.isProfileOrMainRestored()) return
+      await this.clickPopupBackButton(attempt)
+    }
+  }
+
+  /** 判断是否已经退出视频号等无关页面，回到该用户的资料页或微信主界面。 */
+  private async isProfileOrMainRestored(): Promise<boolean> {
     try {
-      robot.keyTap('escape')
+      await this.locateTarget(
+        '资料页恢复校验',
+        '请判断当前微信界面是否已经回到该用户的资料页（包含“添加到通讯录”或“发消息”按钮）或微信主界面（包含左侧会话列表和顶部搜索框）。如果是，输出界面内任意可点击位置：<point>x,y</point>。如果仍停留在视频号页面（有视频内容、视频号标识或“关注”按钮），输出 [NOT_FOUND]。',
+        { timeoutMs: 2500, retryIntervalMs: 400, retryNotFound: false }
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 视觉定位并点击视频号页面上的“返回/关闭”按钮，退出到资料页或主界面。 */
+  private async clickPopupBackButton(attempt: number): Promise<void> {
+    try {
+      const back = await this.locateTarget(
+        '视频号返回按钮',
+        '当前微信停留在视频号页面。请定位页面左上角的“返回”箭头按钮（←）或“关闭”按钮（×），用于退出视频号回到资料页。只输出该按钮内部可点击位置：<point>x,y</point>。如果找不到返回或关闭按钮，输出 [NOT_FOUND]。',
+        { timeoutMs: 4000, retryIntervalMs: 600, retryNotFound: false }
+      )
+      await this.clickLocated(
+        attempt === 1 ? '点击返回退出视频号' : `再次点击返回退出视频号（第 ${attempt} 次）`,
+        back
+      )
+    } catch {
+      const robot = getRobot()
+      try {
+        robot?.keyTap('escape')
+      } catch (error) {
+        console.error('[clickPopupBackButton] 兜底关闭失败', error)
+      }
       await sleep(500)
-    } catch (error) {
-      console.error('[closeWechatPopup] 关闭弹窗失败', error)
     }
   }
 

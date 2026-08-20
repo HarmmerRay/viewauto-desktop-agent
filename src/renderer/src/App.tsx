@@ -1,6 +1,5 @@
 ﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { t } from './i18n'
-import logoUrl from './assets/logo.png'
 import MemoryWindow from './MemoryWindow'
 import './index.css'
 
@@ -132,6 +131,7 @@ interface AppSettings {
     config: Record<string, any>
   }
   customerApiUrl: string
+  friendAddIntervalMinutes: number
   defaultCaptureStrategy: CaptureStrategy
   capture: Partial<Record<AppType, PerAppCapture>>
 }
@@ -283,7 +283,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <img src={logoUrl} alt="SightFlow" className="app-logo" />
+        <span className="app-logo-word">R<span className="app-logo-accent">Auto</span></span>
       </header>
 
       <div className="app-content">
@@ -390,7 +390,9 @@ function ControlPanel({
 
   const statusLabel =
     status === 'running'
-      ? t('status.running')
+      ? operationMode === 'monitor'
+        ? t('status.monitoring')
+        : t('status.running')
       : status === 'error'
         ? t('status.error')
         : t('status.idle')
@@ -422,7 +424,6 @@ function ControlPanel({
           </div>
           <span className="wechat-only-badge">仅微信</span>
         </div>
-        <div className="form-hint wechat-target-hint">此二创版本已在界面和运行时禁用其他平台。</div>
       </div>
 
       <div className="operation-tabs" role="tablist" aria-label="微信操作">
@@ -614,12 +615,12 @@ function BottomBar({
         running ? (
           <button className="bottom-btn bottom-btn-stop" onClick={handleStop}>
             <StopIcon />
-            {t('control.stop')}
+            {t('control.stop.monitor')}
           </button>
         ) : (
           <button className="bottom-btn bottom-btn-play" onClick={handleStart}>
             <PlayIcon />
-            {t('control.start')}
+            {t('control.start.monitor')}
           </button>
         )
       ) : (
@@ -652,7 +653,7 @@ function SettingsWindow(): React.JSX.Element {
     <div className="settings-shell">
       <aside className="settings-sidebar">
         <div className="settings-sidebar-brand">
-          <img src={logoUrl} alt="SightFlow" className="app-logo" />
+          <span className="app-logo-word">R<span className="app-logo-accent">Auto</span></span>
           <span>设置</span>
         </div>
         <button
@@ -679,6 +680,7 @@ function SettingsWindow(): React.JSX.Element {
 function SettingsPanel() {
   const [visionApiKey, setVisionApiKey] = useState('')
   const [customerApiUrl, setCustomerApiUrl] = useState('')
+  const [friendAddIntervalMinutes, setFriendAddIntervalMinutes] = useState(0)
   const [testing, setTesting] = useState(false)
 
   useEffect(() => {
@@ -687,6 +689,7 @@ function SettingsPanel() {
       if (settings) {
         setVisionApiKey(settings.vision?.apiKey || '')
         setCustomerApiUrl(settings.customerApiUrl || '')
+        setFriendAddIntervalMinutes(settings.friendAddIntervalMinutes ?? 0)
       }
     }
 
@@ -696,7 +699,8 @@ function SettingsPanel() {
   const handleSaveVision = useCallback(async () => {
     const payload: Partial<AppSettings> = {
       vision: { apiKey: visionApiKey },
-      customerApiUrl
+      customerApiUrl,
+      friendAddIntervalMinutes
     }
     await window.electron?.invoke('settings:set', payload)
     await window.electron?.invoke('engine:updateConfig', {
@@ -705,7 +709,7 @@ function SettingsPanel() {
       vision: { apiKey: visionApiKey }
     })
     showToast(t('settings.saved'), 'success')
-  }, [visionApiKey, customerApiUrl])
+  }, [visionApiKey, customerApiUrl, friendAddIntervalMinutes])
 
   const handleTestConnection = useCallback(async () => {
     if (!visionApiKey) return
@@ -772,6 +776,25 @@ function SettingsPanel() {
             autoComplete="off"
           />
           <div className="form-hint">自动添加好友时的取号与状态回写地址（如 http://192.168.8.94:8500）</div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">持续添加好友间隔</label>
+          <select
+            className="form-input"
+            value={friendAddIntervalMinutes}
+            onChange={(e) => setFriendAddIntervalMinutes(Number(e.target.value))}
+          >
+            <option value={0}>不等待（立即添加下一个）</option>
+            <option value={5}>5 分钟</option>
+            <option value={10}>10 分钟</option>
+            <option value={15}>15 分钟</option>
+            <option value={30}>30 分钟</option>
+            <option value={60}>60 分钟</option>
+          </select>
+          <div className="form-hint">
+            持续添加模式下，加完一个好友后等待该间隔再添加下一位，可降低被微信风控的风险。
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>

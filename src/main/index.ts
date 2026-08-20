@@ -1,5 +1,7 @@
-﻿import { app, shell, BrowserWindow, ipcMain, desktopCapturer } from 'electron'
+﻿// 每个 appType 独立保存的策略 + 框选区域
+import { app, shell, BrowserWindow, ipcMain, desktopCapturer } from 'electron'
 import { join } from 'path'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { checkAndRequestPermissions } from './permission'
@@ -76,9 +78,10 @@ interface AppSettings {
   }
   // 客户记录后端地址（自动添加好友的取号与状态回写用）
   customerApiUrl: string
+  // 持续添加好友时，加完一个后等待的间隔（分钟），0 表示立即添加下一个
+  friendAddIntervalMinutes: number
   // 默认抓取策略（仅当 appType 没有 per-app 覆盖时生效）
   defaultCaptureStrategy: CaptureStrategy
-  // 每个 appType 独立保存的策略 + 框选区域
   capture: Partial<Record<AppType, PerAppCapture>>
 }
 
@@ -133,6 +136,82 @@ const DEFAULT_PROVIDER_HUB_URL =
   process.env.SIGHTFLOW_PROVIDER_HUB_URL || 'https://sightflow.dev/provider-hub.json'
 const PROVIDER_HUB_CACHE_KEY = 'providerHubCache'
 
+// ── userData 目录迁移 ──
+// 应用重命名为 RAuto 后，Electron 的 userData 目录从 %APPDATA%/sightflow-desktop-agent
+// 变为 %APPDATA%/RAuto。为不丢失已有设置（settings.json）、工作记忆（worktrace）与已安装
+// 服务（providers），启动时把旧目录中的关键数据复制到新目录，并把旧目录改名为 .bak 备份。
+// 必须在 settingsStore 实例化之前执行：electron-store 在构造时就读取 userData 下的配置文件。
+const APP_DISPLAY_NAME = 'RAuto'
+
+// 固定 userData 目录为 %APPDATA%/RAuto，保证开发（electron-vite）与打包（electron-builder）
+// 环境使用完全一致的目录，不依赖 productName 在不同启动方式下的解析差异。
+function pinUserDataDir(): void {
+  try {
+    const expected = join(app.getPath('appData'), APP_DISPLAY_NAME)
+    if (app.getPath('userData') !== expected) {
+      mkdirSync(expected, { recursive: true })
+      app.setPath('userData', expected)
+    }
+  } catch (error) {
+    console.error('[init] 设置 userData 目录失败', error)
+  }
+}
+
+const LEGACY_USERDATA_DIR_NAMES = ['sightflow-desktop-agent', 'SightFlow']
+const MIGRATABLE_USERDATA_ITEMS = [
+  'settings.json',
+  'worktrace',
+  'providers',
+  'Preferences',
+  'Local Storage'
+]
+
+function copyPathRecursive(fromPath: string, toPath: string): void {
+  if (!existsSync(fromPath)) return
+  if (!statSync(fromPath).isDirectory()) {
+    copyFileSync(fromPath, toPath)
+    return
+  }
+  mkdirSync(toPath, { recursive: true })
+  for (const entry of readdirSync(fromPath)) {
+    copyPathRecursive(join(fromPath, entry), join(toPath, entry))
+  }
+}
+
+function migrateLegacyUserData(): void {
+  try {
+    const targetDir = app.getPath('userData')
+    // 新目录已初始化（存在 settings.json）时不迁移，避免覆盖用户新数据。
+    if (existsSync(join(targetDir, 'settings.json'))) return
+
+    const appDataDir = app.getPath('appData')
+    for (const legacyName of LEGACY_USERDATA_DIR_NAMES) {
+      const legacyDir = join(appDataDir, legacyName)
+      if (!existsSync(join(legacyDir, 'settings.json'))) continue
+
+      for (const item of MIGRATABLE_USERDATA_ITEMS) {
+        copyPathRecursive(join(legacyDir, item), join(targetDir, item))
+      }
+      console.log(`[migrate] 已将 userData 从 ${legacyDir} 迁移到 ${targetDir}`)
+
+      // 备份旧目录，避免每次启动重复迁移，同时保留可回退的数据。
+      const backupDir = `${legacyDir}.bak`
+      if (!existsSync(backupDir)) {
+        try {
+          renameSync(legacyDir, backupDir)
+        } catch (error) {
+          console.error(`[migrate] 重命名旧目录失败：${legacyDir}`, error)
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[migrate] 迁移 userData 失败', error)
+  }
+}
+
+pinUserDataDir()
+migrateLegacyUserData()
+
 const settingsStore = new StoreClass({
   name: 'settings',
   defaults: {
@@ -145,6 +224,7 @@ const settingsStore = new StoreClass({
       config: {}
     },
     customerApiUrl: 'http://192.168.8.94:8500',
+    friendAddIntervalMinutes: 0,
     defaultCaptureStrategy: 'auto',
     capture: {}
   }
@@ -468,8 +548,8 @@ async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<Provide
   }
   settingsStore.set(PROVIDER_HUB_CACHE_KEY, cache)
   return cache
+  
 }
-
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
@@ -978,6 +1058,22 @@ app.whenReady().then(async () => {
 
           // 单次模式只处理一个客户。
           if (mode === 'single') break
+
+          // 持续模式：加完一个好友后，按配置的间隔等待，再取下一个，避免触发微信风控。
+          // 等待期间仍可通过“停止添加”立即中断。
+          const intervalMinutes = settings.friendAddIntervalMinutes
+          if (intervalMinutes > 0) {
+            logWechatFriend(
+              'thinking',
+              `已添加 ${addedCount} 个好友，等待 ${intervalMinutes} 分钟后再添加下一位…`
+            )
+            const deadline = Date.now() + intervalMinutes * 60 * 1000
+            while (Date.now() < deadline) {
+              if (wechatFriendStopRequested) break
+              await new Promise((resolve) => setTimeout(resolve, 1000))
+            }
+            if (wechatFriendStopRequested) break
+          }
         }
 
         const stopped = wechatFriendStopRequested
@@ -1535,6 +1631,12 @@ function normalizeSettings(raw: any): AppSettings {
       typeof raw?.customerApiUrl === 'string' && raw.customerApiUrl.trim()
         ? raw.customerApiUrl.trim()
         : 'http://192.168.8.94:8500',
+    friendAddIntervalMinutes:
+      typeof raw?.friendAddIntervalMinutes === 'number' &&
+      Number.isFinite(raw.friendAddIntervalMinutes) &&
+      raw.friendAddIntervalMinutes >= 0
+        ? Math.floor(raw.friendAddIntervalMinutes)
+        : 0,
     defaultCaptureStrategy: coerceStrategy(raw?.defaultCaptureStrategy, 'auto'),
     capture: normalizeCapture(raw?.capture)
   }

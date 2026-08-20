@@ -6,6 +6,7 @@
 //   1. 聊天回复：截图 → AI 分析 → 回复文字
 //   2. VLM 视觉检测：截图 → AI 分析 → bbox/point 坐标
 
+import { nativeImage } from 'electron'
 import { MemoryCardBrief } from './trace/trace-types'
 
 export interface AIClientConfig {
@@ -39,6 +40,33 @@ const REPLY_SYSTEM_PROMPT = `你是一个微信自动回复助手。你会收到
 3. 如果最新消息是系统消息、群公告、红包、转账等非对话消息，输出 [SKIP]
 4. 如果无法判断是否需要回复，输出 [SKIP]
 5. 回复要自然、口语化，像真人对话`
+
+// VLM 输入图片最长边上限：过大图片会稀释小目标、浪费 token，豆包 lite 模型内部也会
+// 缩放到固定尺寸，这里主动等比缩小到合理范围，既省 token 又保证识别精度。
+const MAX_VISION_EDGE = 1280
+
+function downscaleVisionImage(screenshotBase64: string): string {
+  try {
+    const dataUrl = screenshotBase64.startsWith('data:')
+      ? screenshotBase64
+      : `data:image/png;base64,${screenshotBase64}`
+    const image = nativeImage.createFromDataURL(dataUrl)
+    if (image.isEmpty()) return screenshotBase64
+    const size = image.getSize()
+    const maxEdge = Math.max(size.width, size.height)
+    if (maxEdge <= MAX_VISION_EDGE) return screenshotBase64
+    const ratio = MAX_VISION_EDGE / maxEdge
+    return image
+      .resize({
+        width: Math.max(1, Math.round(size.width * ratio)),
+        height: Math.max(1, Math.round(size.height * ratio)),
+        quality: 'good'
+      })
+      .toDataURL()
+  } catch {
+    return screenshotBase64
+  }
+}
 
 export class AIClient {
   private config: AIClientConfig
@@ -89,7 +117,7 @@ export class AIClient {
     return await this.callVision(
       '你是一个视觉分析专家。请严格按照用户要求的格式输出检测结果。',
       prompt,
-      screenshotBase64
+      downscaleVisionImage(screenshotBase64)
     )
   }
 

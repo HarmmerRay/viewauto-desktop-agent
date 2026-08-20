@@ -70,55 +70,112 @@ type PlatformWindow = {
   [key: string]: any
 }
 
+/** 返回可执行文件小写 basename（不含 .exe 后缀），用于按进程路径识别窗口归属。 */
+function exeBasename(pathValue: unknown): string {
+  const raw = String(pathValue || '')
+  const base = raw.split(/[\\/]/).pop() || ''
+  return base.toLowerCase().replace(/\.exe$/, '')
+}
+
 async function getWechatWindowInWin(appType: AppType): Promise<PlatformWindow | null> {
   try {
     const { windowManager } = require('node-window-manager')
 
-    // 不要直接信任 getActiveWindow()：填写验证消息 / 备注时，当前激活窗口往往是
-    // “添加朋友”“朋友验证”等独立弹窗（标题也可能叫“微信”）。若把弹窗当成主窗口，
-    // 后续截图 bounds 会指向弹窗而非主窗口，主窗口和搜索框反而被漏掉。
-    // 这里枚举所有标题匹配的窗口，优先选“不被其它窗口拥有”且尺寸最大的主窗口。
-    const appWindows = (windowManager.getWindows() || []).filter((window: any) =>
-      matchWechatType(window.getTitle(), appType)
-    )
+    // 微信新版是 Weixin.exe，旧版是 WeChat.exe；企业微信是 WXWork.exe / WeCom.exe。
+    // 最小化 / 隐藏到托盘时主窗口标题可能退化为空串，因此这里优先按可执行文件名识别
+    // 微信相关窗口，标题匹配只作兜底，避免主窗口被漏掉。
+    const exeNames =
+      appType === 'wechat' ? ['weixin', 'wechat'] : ['wxwork', 'wecom', 'wework']
 
-    // 主窗口通常不被任何窗口拥有（getOwner 为空），弹窗的 owner 会指向主窗口。
-    const notOwned = appWindows.filter((window: any) => !getWindowOwnerId(window))
-    const candidatePool = notOwned.length > 0 ? notOwned : appWindows
+    const allWindows = windowManager.getWindows() || []
+    const related = allWindows.filter((window: any) => {
+      const exe = exeBasename(window.path)
+      if (exeNames.includes(exe)) return true
+      return matchWechatType(window.getTitle(), appType)
+    })
 
-    // 主窗口通常是尺寸最大的那个，先按面积降序，避免误选到大的独立弹窗。
-    const sorted = [...candidatePool].sort((a: any, b: any) => {
+    if (related.length === 0) return null
+
+    const byAreaDesc = (a: any, b: any): number => {
       const ab = getWindowBounds(a)
       const bb = getWindowBounds(b)
       const areaA = (ab?.width ?? 0) * (ab?.height ?? 0)
       const areaB = (bb?.width ?? 0) * (bb?.height ?? 0)
       return areaB - areaA
-    })
-
-    const foundWindow =
-      sorted.find((window: any) => {
-        const bounds = getWindowBounds(window)
-        return window.isVisible() && validateWindowBounds(bounds) && !isMinimizedWindowBounds(bounds)
-      }) ||
-      sorted.find((window: any) => {
-        const bounds = getWindowBounds(window)
-        return validateWindowBounds(bounds) && !isMinimizedWindowBounds(bounds)
-      }) ||
-      sorted.find((window: any) => window.isVisible())
-
-    if (!foundWindow) return null
-
-    // Windows reports a minimized window at roughly (-32000, -32000), while closing WeChat
-    // normally hides its main window in the tray. Both states produce a white/empty capture.
-    const bounds = getWindowBounds(foundWindow)
-    if (!foundWindow.isVisible() || isMinimizedWindowBounds(bounds)) {
-      foundWindow.restore?.()
-      foundWindow.show?.()
-      foundWindow.bringToTop?.()
-      await new Promise((resolve) => setTimeout(resolve, 350))
     }
 
-    return foundWindow
+    // 主窗口识别（关键）：主窗口的专属特征是标题精确等于中文主标题“微信”/“企业微信”，
+    // 且它“拥有”其它窗口（其它窗口的 ownerId 指向它）。即使最小化，主窗口标题也保留，
+    // 只是 bounds 退化为任务栏按钮大小（约 160x28）。
+    //
+    // 不能简单地按“面积最大”选主窗口：最小化后主窗口面积退化（160x28），而微信还有一批
+    // 标题为“Weixin”或“WxTrayIconMessageWindow”的隐藏辅助窗口（160x112 或 2580x1029），
+    // 面积更大，若混在一起按面积排序会误选到它们，restore 出来就变成很小的空白窗口。
+    const normalizeTitle = (window: any): string =>
+      String(window.getTitle?.() ?? '').replace(/^\u200e/, '').trim()
+    const exactMainTitles = appType === 'wechat' ? ['微信'] : ['企业微信']
+
+    // 其它窗口的 ownerId 指向主窗口，因此主窗口 id 会出现在 ownerId 集合里。
+    const ownerIds = new Set(
+      related.map((window: any) => getWindowOwnerId(window)).filter((id: number) => id > 0)
+    )
+    const isOwning = (window: any): boolean => ownerIds.has(Number(window.id))
+
+    // 优先：标题精确等于中文主标题的窗口（无论是否最小化，主窗口都保留该标题）。
+    const exactMain = related.filter((window: any) =>
+      exactMainTitles.includes(normalizeTitle(window))
+    )
+
+    let mainWindow: PlatformWindow | null = null
+    if (exactMain.length > 0) {
+      // 有精确主标题窗口：优先选“拥有其它窗口”的那个（通常唯一）。
+      const owning = exactMain.filter(isOwning)
+      mainWindow = (owning.length > 0 ? owning : exactMain)[0] || null
+    } else {
+      // 无精确中文主标题（英文版 / 隐藏到托盘导致标题退化）时，依次退回：
+      // “拥有其它窗口且标题匹配”→“标题匹配”→“拥有其它窗口”→“全部”，每层按面积取最大兜底。
+      const titled = related.filter((window: any) => matchWechatType(window.getTitle(), appType))
+      const titledOwning = titled.filter(isOwning)
+      const allOwning = related.filter(isOwning)
+      const pool =
+        titledOwning.length > 0
+          ? titledOwning
+          : titled.length > 0
+            ? titled
+            : allOwning.length > 0
+              ? allOwning
+              : related
+      mainWindow = [...pool].sort(byAreaDesc)[0] || null
+    }
+
+    if (!mainWindow) return null
+
+    // 最小化 / 隐藏检测：最小化时 bounds 落到 (-32000,-32000) 且尺寸退化为任务栏按钮大小
+    // （validateWindowBounds 会因尺寸过小判定无效）；隐藏到托盘时 isVisible 为 false。
+    // 两种状态都要还原，否则后续截图取到屏幕外或空白区域。
+    const bounds = getWindowBounds(mainWindow)
+    const minimized = isMinimizedWindowBounds(bounds)
+    const hidden = !mainWindow.isVisible?.()
+
+    if (minimized || hidden) {
+      try {
+        mainWindow.restore?.()
+        mainWindow.show?.()
+        mainWindow.bringToTop?.()
+      } catch (err: any) {
+        console.error('[window-utils] 还原微信窗口失败:', err.message)
+      }
+
+      // 轮询等待 bounds 回到屏幕内且尺寸有效，最多约 2 秒。之前固定等 350ms 常常不够，
+      // 窗口还没还原完就被拿去截图，导致取到 (-32000) 屏幕外或空白的错误区域。
+      for (let i = 0; i < 10; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const b = getWindowBounds(mainWindow)
+        if (b && !isMinimizedWindowBounds(b) && validateWindowBounds(b)) break
+      }
+    }
+
+    return mainWindow
   } catch (err: any) {
     console.error('[window-utils] getWechatWindowInWin error:', err.message)
     return null
@@ -189,7 +246,18 @@ export async function getWechatWindowInfo(
   const cached = wechatWindowInfoCache.get(appType)
   const now = Date.now()
   if (!bypassCache && cached && now - cached.timestamp < WINDOW_INFO_CACHE_DURATION) {
-    return cached.result
+    // 命中缓存时也要做一次轻量检测：消息监控等持续运行场景下，用户可能在两次截图之间
+    // 把微信最小化或隐藏到托盘。此时若直接返回缓存的旧 bounds（仍是正常坐标），后续截图
+    // 会取到空白区域。检测到窗口已最小化/隐藏就跳过缓存，走下面的重新枚举 + 自动还原逻辑。
+    const cachedWindow = cached.result?.wechatWindow
+    if (cachedWindow) {
+      const cachedBounds = getWindowBounds(cachedWindow)
+      const cachedHidden =
+        typeof cachedWindow.isVisible === 'function' && !cachedWindow.isVisible()
+      if (!isMinimizedWindowBounds(cachedBounds) && !cachedHidden) {
+        return cached.result
+      }
+    }
   }
 
   const pendingPromise = wechatWindowInfoPendingPromises.get(appType)
