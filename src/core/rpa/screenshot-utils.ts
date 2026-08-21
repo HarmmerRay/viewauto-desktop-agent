@@ -342,6 +342,73 @@ function isWechatRelatedWindow(
   return false
 }
 
+/** 判断可执行文件名是否属于微信（weixin / wechat / wechatappex 等辅助 exe）。 */
+function looksLikeWechatExe(pathValue: unknown): boolean {
+  const exe = exeBasename(pathValue)
+  return exe.includes('wechat') || exe.includes('weixin')
+}
+
+/**
+ * 通过窗口列表查找微信的独立弹窗（如“添加朋友”“朋友验证”）。
+ *
+ * 这些弹窗在新版微信里是独立 HWND，可能运行在辅助进程（WeChatAppEx.exe），并且不一定
+ * 叠加在主窗口上方——此时主窗口合成截图（getWechatCompositeBounds 只并入 owned 或相交
+ * 的窗口）会漏掉它。这里直接按窗口标题关键词 + 微信可执行文件匹配，返回弹窗的屏幕
+ * bounds（逻辑像素），供后续“只截这个弹窗区域、再定位其中的按钮”使用。
+ *
+ * titleKeywords 为空时，返回第一个可见的微信相关非主窗口（按面积降序），用于兜底识别
+ * “当前弹出的那个微信弹窗”。
+ */
+export function findWechatPopupWindow(
+  titleKeywords: string[] = []
+): { title: string; bounds: Electron.Rectangle } | null {
+  if (process.platform !== 'win32') return null
+  try {
+    const { windowManager } = require('node-window-manager')
+    const keywords = titleKeywords.map((k) => String(k).toLowerCase()).filter(Boolean)
+    // 主窗口标题（精确匹配后排除），避免把主窗口当成弹窗。
+    const mainTitles = ['微信', '企业微信', 'wechat', 'weixin', 'wecom', 'wxwork']
+
+    let bestByArea: { title: string; bounds: Electron.Rectangle } | null = null
+
+    for (const win of windowManager.getWindows() || []) {
+      if (!win?.isVisible?.()) continue
+      const rawTitle = String(win.getTitle?.() || '').replace(/^\u200e/, '').trim()
+      const bounds = win.getBounds?.()
+      if (!bounds || !isUsableCaptureBounds(bounds)) continue
+      // 只认微信相关窗口（可执行文件为 weixin/wechat/wechatappex 等），避免误选其它程序。
+      if (!looksLikeWechatExe(win.path)) continue
+
+      const normalized = rawTitle.toLowerCase()
+
+      // 1) 标题关键词命中（例如“添加朋友”“朋友验证”）→ 直接返回。
+      if (keywords.length > 0 && keywords.some((k) => normalized.includes(k))) {
+        return {
+          title: rawTitle,
+          bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+        }
+      }
+
+      // 2) 兜底：非主窗口的微信弹窗（标题不是“微信”等），记下面积最大的那个。
+      // 资料卡弹窗的标题可能是昵称而非固定文案，需要靠“非主窗口”这个信号识别。
+      if (rawTitle && !mainTitles.includes(normalized)) {
+        const area = bounds.width * bounds.height
+        if (!bestByArea || area > bestByArea.bounds.width * bestByArea.bounds.height) {
+          bestByArea = {
+            title: rawTitle,
+            bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+          }
+        }
+      }
+    }
+
+    return bestByArea
+  } catch (error) {
+    console.warn('[findWechatPopupWindow] 枚举微信弹窗失败:', error)
+    return null
+  }
+}
+
 function getWechatCompositeBounds(windowCoreResult: any): Electron.Rectangle {
   const mainBounds = windowCoreResult.bounds as Electron.Rectangle
   if (process.platform !== 'win32') return mainBounds

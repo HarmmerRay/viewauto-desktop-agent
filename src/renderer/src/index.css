@@ -663,6 +663,45 @@ button:focus-visible {
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
 }
 
+.input-with-action {
+  position: relative;
+}
+
+.input-with-action .form-input {
+  padding-right: 38px;
+}
+
+.input-action-btn {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.input-action-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-glass-input);
+}
+
+.input-action-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
 .form-input::placeholder {
   color: var(--text-muted);
 }

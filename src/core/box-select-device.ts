@@ -48,7 +48,7 @@ export class BoxSelectDevice implements DesktopDevice {
   }
 
   // BoxSelectDevice 不需要视觉密钥；保留 no-op 以满足接口（engine:updateConfig 会调）。
-  setApiKey(apiKey: string): void {
+  setApiKey(apiKey: string, _model?: string, _baseURL?: string): void {
     void apiKey
   }
 

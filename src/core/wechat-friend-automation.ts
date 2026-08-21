@@ -1,6 +1,6 @@
 import { AIClient } from './ai-client'
-import { humanLikeClickAt, replaceTextAtAction } from './rpa/input-utils'
-import { captureWechatWindow } from './rpa/screenshot-utils'
+import { humanLikeClickAt, pressEnterAction, replaceTextAtAction } from './rpa/input-utils'
+import { captureScreenRegion, captureWechatWindow, findWechatPopupWindow } from './rpa/screenshot-utils'
 import { getRobot } from './rpa/util'
 import { parsePoint, pointToScreenCoords } from './rpa/vision-utils'
 import { getWechatWindowInfo } from './rpa/window-utils'
@@ -25,6 +25,8 @@ type LocateTargetOptions = {
   retryIntervalMs?: number
   timeoutMs?: number
   retryNotFound?: boolean
+  /** 目标位于微信独立弹窗（如“添加朋友”“朋友验证”）内时，传入标题关键词用于检测弹窗。 */
+  popupTitles?: string[]
 }
 
 class WechatUiStateError extends Error {
@@ -59,7 +61,18 @@ class WechatFriendUserNotFoundError extends Error {
   }
 }
 
+/** 微信触发风控（操作过于频繁，请稍后再试），本次申请未真正发出成功，应跳过该账号。 */
+class WechatFriendRateLimitedError extends Error {
+  constructor(message = '微信提示操作过于频繁，请稍后再试（触发风控）') {
+    super(message)
+    this.name = 'WechatFriendRateLimitedError'
+  }
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** 好友添加流程中可能出现的微信弹窗标题关键词（用于窗口列表检测与聚焦截图）。 */
+const FRIEND_POPUP_TITLES = ['添加朋友', '朋友验证', '发送朋友申请', '验证申请', '添加']
 
 /**
  * 判断窗口 bounds 是否处于最小化状态。
@@ -123,28 +136,22 @@ export class WechatFriendAutomation {
     await this.focusWechatWindow()
     this.assertNotStopped()
 
+    // 新路径：主窗口「➕」→ 下拉菜单「添加朋友」打开添加朋友弹窗，再在弹窗内直接输
+    // 微信号回车。不再依赖会话列表顶部搜索框的“网络查找手机/QQ号”下拉行（该行高度
+    // 会随搜索结果变化，固定坐标点不中导致流程不稳定）。
+    await this.openAddFriendEntry()
+    this.assertNotStopped()
+
     const inputStartedAt = Date.now()
-    const searchTarget = await this.fillSearchBox(request.account)
+    const searchTarget = await this.fillAddFriendSearchBox(request.account)
     this.assertNotStopped()
     this.callbacks.trace({
       phase: 'act',
-      summary: '输入待添加的微信帐号',
+      summary: '在添加朋友弹窗中输入待添加的微信帐号',
       screenshotBase64: searchTarget.screenshot,
       action: { kind: 'input', target: searchTarget.point, payload: request.account },
       outcome: { status: 'ok', latencyMs: Date.now() - inputStartedAt }
     })
-
-    // 不直接按回车，避免微信把第一个本地聊天记录当成搜索目标。
-    // 微信的网络搜索结果是异步出现的：后续定位会持续重新截图，直到结果真正出现。
-    await this.locateAndClick(
-      '网络搜索结果',
-      `当前微信搜索框中已经输入“${request.account}”。请定位用于通过网络查找该微信号或手机号的可点击结果；它可能显示为“网络查找微信号/手机号：${request.account}”、带放大镜的搜索项，或明确匹配到的用户资料卡。不要点击本地聊天记录。只输出目标结果内部的可点击位置：<point>x,y</point>。如果搜索结果下拉区域尚未出现或仍在加载，输出 [WAITING]；只有界面明确显示“无法找到该用户”“查无此人”等提示时才输出 [USER_NOT_FOUND]。`,
-      {
-        initialDelayMs: 700,
-        retryIntervalMs: 900,
-        timeoutMs: 20000
-      }
-    )
 
     await this.clickAddToContactsButton()
     this.assertNotStopped()
@@ -155,7 +162,9 @@ export class WechatFriendAutomation {
         '验证消息输入框',
         '请定位微信“朋友验证”或“发送朋友申请”表单中的验证消息输入框。它通常位于“你需要发送验证申请，等待对方通过”提示下方。只输出输入框内部可点击位置：<point>x,y</point>。',
         request.verificationMessage,
-        '填写好友验证消息'
+        '填写好友验证消息',
+        false,
+        FRIEND_POPUP_TITLES
       )
     }
 
@@ -165,7 +174,8 @@ export class WechatFriendAutomation {
         '请定位当前好友申请表单中的“备注”“备注名”输入框。只输出输入框内部可点击位置：<point>x,y</point>。如果当前表单没有备注输入框，输出 [NOT_FOUND]。',
         request.remark,
         '填写好友备注',
-        true
+        true,
+        FRIEND_POPUP_TITLES
       )
     }
 
@@ -173,7 +183,8 @@ export class WechatFriendAutomation {
     this.assertNotStopped()
     const finalTarget = await this.locateTarget(
       '最终发送按钮',
-      '请定位当前微信好友申请表单中会真正提交申请的“发送”“确定”或“完成”按钮。只输出按钮内部可点击位置：<point>x,y</point>。不要执行点击。'
+      '请定位当前微信好友申请表单中会真正提交申请的“发送”“确定”或“完成”按钮。只输出按钮内部可点击位置：<point>x,y</point>。不要执行点击。',
+      { popupTitles: FRIEND_POPUP_TITLES }
     )
     this.callbacks.trace({
       phase: 'verify',
@@ -197,7 +208,8 @@ export class WechatFriendAutomation {
     try {
       target = await this.locateTarget(
         '最终发送按钮',
-        '当前应当停留在微信好友申请表单。请定位会真正提交申请的“发送”“确定”或“完成”按钮。只输出按钮内部可点击位置：<point>x,y</point>。如果当前已经显示申请已发送，输出 [ALREADY_SENT]。'
+        '当前应当停留在微信好友申请表单。请定位会真正提交申请的“发送”“确定”或“完成”按钮。只输出按钮内部可点击位置：<point>x,y</point>。如果当前已经显示申请已发送，输出 [ALREADY_SENT]。',
+        { popupTitles: FRIEND_POPUP_TITLES }
       )
     } catch (error) {
       if (error instanceof WechatUiStateError && error.state === 'already_sent') {
@@ -225,6 +237,23 @@ export class WechatFriendAutomation {
     })
 
     await sleep(900)
+
+    // 发送后检查是否触发微信风控（“操作过于频繁，请稍后再试”）。触发风控说明本次
+    // 申请并未真正发出成功，应跳过该账号而不是回写为“已发申请”。
+    if (await this.isRateLimitedAfterSend()) {
+      this.callbacks.log(
+        'skip',
+        `客户 ${request.account} 触发微信风控（操作过于频繁），本次好友申请未成功`
+      )
+      this.callbacks.trace({
+        phase: 'verify',
+        summary: '发送后检测到微信风控提示，本次申请未成功',
+        outcome: { status: 'skip', detail: '操作过于频繁，请稍后再试' }
+      })
+      this.preparedRequest = null
+      throw new WechatFriendRateLimitedError()
+    }
+
     const after = await captureWechatWindow('wechat', undefined, {
       mode: 'screen',
       bypassCache: true,
@@ -372,16 +401,6 @@ export class WechatFriendAutomation {
     await sleep(300)
   }
 
-  private async locateAndClick(
-    name: string,
-    prompt: string,
-    options?: LocateTargetOptions
-  ): Promise<LocatedTarget> {
-    const target = await this.locateTarget(name, prompt, options)
-    await this.clickLocated(`点击${name}`, target)
-    return target
-  }
-
   private async clickLocated(summary: string, target: LocatedTarget): Promise<void> {
     const start = Date.now()
     await humanLikeClickAt(target.point[0], target.point[1])
@@ -396,52 +415,110 @@ export class WechatFriendAutomation {
   }
 
   /**
-   * 点击并聚焦搜索框，输入帐号后校验搜索框内确实出现了该帐号文本。
+   * 打开“添加朋友”弹窗：点击主窗口顶部「➕」按钮，再点下拉菜单里的「添加朋友」。
    *
-   * 点击搜索框可能发生坐标漂移（点偏），导致后续输入落到别处、搜索框未获得焦点；
-   * 此时直接进入“等待搜索结果”的重试会永远等不到结果。这里在输入后校验一次，若未
-   * 成功输入则重新定位并点击，最多重试 3 次，避免无效的 900ms 空转。
+   * 这是更稳定的入口：不再依赖会话列表顶部搜索框的“网络查找手机/QQ号”下拉行，
+   * 该行高度会随搜索结果变化导致固定坐标点不中。
    */
-  private async fillSearchBox(account: string): Promise<LocatedTarget> {
+  private async openAddFriendEntry(): Promise<void> {
+    this.callbacks.log('thinking', '正在通过「➕ → 添加朋友」打开添加朋友弹窗')
+
+    const plusTarget = await this.locateTarget(
+      '加号按钮',
+      '请定位微信主窗口顶部的“➕”加号按钮，它通常位于顶部搜索框右侧。只输出该按钮内部可点击位置：<point>x,y</point>。',
+      { initialDelayMs: 300, timeoutMs: 10000 }
+    )
+    await this.clickLocated('点击加号按钮', plusTarget)
+    this.assertNotStopped()
+
+    const menuTarget = await this.locateTarget(
+      '添加朋友菜单项',
+      '点击“➕”后弹出了下拉菜单，通常包含“发起群聊”“添加朋友”“扫一扫”“收付款”等项。请定位其中的“添加朋友”菜单项。只输出该菜单项内部可点击位置：<point>x,y</point>。如果下拉菜单尚未弹出，输出 [WAITING]。',
+      { initialDelayMs: 400, retryIntervalMs: 600, timeoutMs: 8000 }
+    )
+    await this.clickLocated('点击“添加朋友”菜单项', menuTarget)
+    this.assertNotStopped()
+
+    await this.waitForAddFriendPopup()
+  }
+
+  /**
+   * 校验“添加朋友”弹窗已经打开：优先通过窗口列表检测标题为“添加朋友”的独立弹窗，
+   * 检测不到时退化为视觉确认，避免把主窗口误当成弹窗后白跑后续步骤。
+   */
+  private async waitForAddFriendPopup(): Promise<void> {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      this.assertNotStopped()
+      if (findWechatPopupWindow(['添加朋友'])) return
+      await sleep(400)
+    }
+
+    try {
+      await this.locateTarget(
+        '添加朋友弹窗',
+        '请判断微信界面是否已经打开“添加朋友”窗口：顶部有一个搜索框（占位文字通常为“微信号/手机号”），下方显示“我的微信号”和二维码等。如果是，输出界面内任意可点击位置：<point>x,y</point>；如果不是，输出 [NOT_FOUND]。',
+        { timeoutMs: 4000, retryIntervalMs: 500 }
+      )
+    } catch {
+      throw new Error('多次尝试后仍未打开“添加朋友”弹窗')
+    }
+  }
+
+  /**
+   * 在“添加朋友”弹窗内点击搜索框、粘贴帐号并回车触发搜索。
+   *
+   * 与旧路径（会话列表顶部搜索框 + “网络查找手机/QQ号”下拉行）不同：这里直接输
+   * 微信号回车，回车后弹窗内会直接出现资料卡与“添加到通讯录”按钮。点击搜索框可能
+   * 发生坐标漂移导致输入落空，因此输入后校验一次搜索是否生效，未生效则重新点击。
+   */
+  private async fillAddFriendSearchBox(account: string): Promise<LocatedTarget> {
     const maxAttempts = 3
     let lastTarget: LocatedTarget | null = null
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       this.assertNotStopped()
       lastTarget = await this.locateTarget(
-        '微信搜索框',
-        '请定位微信主窗口左侧会话列表顶部的搜索输入框。它通常带有“搜索”占位文字或放大镜图标。只输出该输入框内部可点击位置：<point>x,y</point>，坐标范围 0-1000。'
+        '添加朋友搜索框',
+        '请定位“添加朋友”窗口顶部的搜索输入框，占位文字通常为“微信号/手机号”。只输出该输入框内部可点击位置：<point>x,y</point>。',
+        { popupTitles: FRIEND_POPUP_TITLES }
       )
       await this.clickLocated(
-        attempt === 1 ? '点击微信搜索框' : `重新点击微信搜索框（第 ${attempt} 次）`,
+        attempt === 1 ? '点击添加朋友搜索框' : `重新点击添加朋友搜索框（第 ${attempt} 次）`,
         lastTarget
       )
       await replaceTextAtAction(undefined, undefined, account, false)
+      await sleep(350)
+      await pressEnterAction()
       this.assertNotStopped()
 
-      if (await this.isSearchBoxFilled(account)) return lastTarget
+      if (await this.isAddFriendSearchSubmitted(account)) return lastTarget
 
       this.callbacks.log(
         'thinking',
         attempt < maxAttempts
-          ? '搜索框未成功输入帐号，疑似点击发生漂移，正在重新定位并点击'
-          : '搜索框多次尝试后仍未成功输入帐号'
+          ? '添加朋友搜索未生效，疑似点击发生漂移，正在重新定位并点击'
+          : '添加朋友搜索框多次尝试后仍未成功搜索'
       )
       this.callbacks.trace({
         phase: 'verify',
-        summary: '校验搜索框输入结果',
-        outcome: { status: 'skip', detail: `第 ${attempt} 次输入后搜索框未出现目标文本` }
+        summary: '校验添加朋友搜索是否生效',
+        outcome: { status: 'skip', detail: `第 ${attempt} 次输入后未出现搜索结果` }
       })
     }
-    throw new Error('多次点击搜索框后仍未成功输入帐号，搜索框可能未获得焦点')
+    throw new Error('多次尝试后仍未在“添加朋友”弹窗中成功搜索该帐号')
   }
 
-  /** 校验搜索框内是否已经成功输入指定帐号文本。 */
-  private async isSearchBoxFilled(account: string): Promise<boolean> {
+  /** 校验“添加朋友”弹窗内是否已经出现搜索结果（资料卡或“无法找到该用户”提示）。 */
+  private async isAddFriendSearchSubmitted(account: string): Promise<boolean> {
     try {
       await this.locateTarget(
-        '搜索框输入校验',
-        `请判断微信主窗口顶部搜索输入框中是否已经显示文本“${account}”（重点看输入框内已输入的文本，而不是下方展开的搜索结果）。如果输入框内确实已显示该文本，输出输入框内部任意位置：<point>x,y</point>；如果输入框为空或文本不一致，输出 [NOT_FOUND]。`,
-        { timeoutMs: 3000, retryIntervalMs: 500, retryNotFound: false }
+        '添加朋友搜索结果校验',
+        `请在“添加朋友”窗口内判断：针对“${account}”的搜索是否已经出现结果（例如显示该用户资料卡、头像和“添加到通讯录”按钮），或明确显示“无法找到该用户”“查无此人”等提示。如果出现任一结果，输出界面内任意可点击位置：<point>x,y</point>；如果仍为空或仍在搜索中，输出 [WAITING]。`,
+        {
+          timeoutMs: 3500,
+          retryIntervalMs: 500,
+          retryNotFound: false,
+          popupTitles: FRIEND_POPUP_TITLES
+        }
       )
       return true
     } catch {
@@ -464,7 +541,7 @@ export class WechatFriendAutomation {
         addTarget = await this.locateTarget(
           '添加到通讯录按钮',
           '请查看当前微信用户资料页或资料弹窗，定位“添加到通讯录”按钮。它通常是一个实心绿色（或品牌色）圆角按钮，上面有白色文字“添加到通讯录”，位于资料页下方。\n\n注意：资料页中可能还有“视频号”“公众号”“朋友圈”“更多信息”等入口卡片。这些入口通常带有封面缩略图、头像或图标，是卡片样式；而“添加到通讯录”是一个纯色（绿色）实心圆角按钮，上面只有白色文字、没有封面图。两者视觉差异明显，绝对不要把带图标的入口卡片当成按钮。只输出绿色“添加到通讯录”按钮内部可点击位置：<point>x,y</point>。如果资料页或弹窗仍在加载，输出 [WAITING]；如果界面明确表明对方已经是好友并只显示“发消息”，输出 [ALREADY_FRIEND]；如果界面明确显示“无法找到该用户”“查无此人”等提示（说明该账号不存在，而不是没有“添加到通讯录”按钮），输出 [USER_NOT_FOUND]；如果只是看不到“添加到通讯录”按钮但没有“无法找到该用户”提示，输出 [NOT_FOUND]。',
-          { initialDelayMs: attempt === 1 ? 700 : 300, timeoutMs: 15000 }
+          { initialDelayMs: attempt === 1 ? 700 : 300, timeoutMs: 15000, popupTitles: FRIEND_POPUP_TITLES }
         )
       } catch (error) {
         if (error instanceof WechatUiStateError && error.state === 'already_friend') {
@@ -503,7 +580,21 @@ export class WechatFriendAutomation {
       await this.locateTarget(
         '好友申请表单',
         '请判断当前微信界面是否已经打开“朋友验证”或“发送朋友申请”表单。该表单通常包含“你需要发送验证申请，等待对方通过”提示、一个验证消息输入框以及“发送”按钮。如果是，输出表单内任意可点击位置：<point>x,y</point>。如果不是（例如打开的是视频号、朋友圈、公众号或其他弹窗），输出 [NOT_FOUND]。',
-        { timeoutMs: 3500, retryIntervalMs: 600, retryNotFound: false }
+        { timeoutMs: 3500, retryIntervalMs: 600, retryNotFound: false, popupTitles: FRIEND_POPUP_TITLES }
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 判断点击发送后是否出现微信风控提示（“操作过于频繁，请稍后再试”）。 */
+  private async isRateLimitedAfterSend(): Promise<boolean> {
+    try {
+      await this.locateTarget(
+        '发送后风控提示',
+        '请判断当前微信界面是否出现了“操作过于频繁，请稍后再试”的提示（通常是一个弹出的提示条或小弹窗）。如果出现了，输出该提示所在位置：<point>x,y</point>；如果没有出现，输出 [NOT_FOUND]。',
+        { timeoutMs: 3000, retryIntervalMs: 500, retryNotFound: false, popupTitles: FRIEND_POPUP_TITLES }
       )
       return true
     } catch {
@@ -578,14 +669,14 @@ export class WechatFriendAutomation {
     prompt: string,
     text: string,
     summary: string,
-    optional = false
+    optional = false,
+    popupTitles?: string[]
   ): Promise<void> {
     try {
-      const target = await this.locateTarget(
-        name,
-        prompt,
-        optional ? { timeoutMs: 0, retryNotFound: false } : undefined
-      )
+      const target = await this.locateTarget(name, prompt, {
+        ...(optional ? { timeoutMs: 0, retryNotFound: false } : {}),
+        ...(popupTitles?.length ? { popupTitles } : {})
+      })
       const start = Date.now()
       await replaceTextAtAction(target.point[0], target.point[1], text, false)
       this.callbacks.trace({
@@ -626,7 +717,7 @@ export class WechatFriendAutomation {
       this.assertNotStopped()
       attempt += 1
       try {
-        return await this.locateTargetOnce(name, prompt)
+        return await this.locateTargetOnce(name, prompt, options)
       } catch (error) {
         if (error instanceof WechatFriendStoppedError) throw error
 
@@ -662,13 +753,42 @@ export class WechatFriendAutomation {
     throw new Error(`等待微信界面“${name}”出现超时${detail ? `：${detail}` : ''}`)
   }
 
-  private async locateTargetOnce(name: string, prompt: string): Promise<LocatedTarget> {
+  private async locateTargetOnce(
+    name: string,
+    prompt: string,
+    options: LocateTargetOptions = {}
+  ): Promise<LocatedTarget> {
     this.callbacks.log('thinking', `正在识别：${name}`)
-    const capture = await captureWechatWindow('wechat', undefined, {
-      mode: 'screen',
-      bypassCache: true,
-      includeRelatedWindows: true
-    })
+
+    // 优先通过窗口列表检测微信独立弹窗（如“添加朋友”“朋友验证”），只截这个弹窗区域：
+    // 弹窗可能落在主窗口像素区域之外，主窗口合成截图会漏掉它；而聚焦弹窗截图能让按钮
+    // 占据更大比例，归一化坐标更准。检测不到弹窗时退回主窗口合成截图兜底。
+    let capture: any = null
+    if (options.popupTitles?.length) {
+      const popup = findWechatPopupWindow(options.popupTitles)
+      if (popup) {
+        this.callbacks.log('thinking', `检测到微信弹窗「${popup.title}」，正在截取该弹窗区域`)
+        const region = await captureScreenRegion(popup.bounds)
+        if (region.success && region.screenshotBase64 && region.display) {
+          capture = {
+            success: true,
+            screenshotBase64: region.screenshotBase64,
+            bounds: popup.bounds,
+            display: { id: region.display.id, scaleFactor: region.display.scaleFactor },
+            captureMethod: 'popup-region'
+          }
+        }
+      }
+    }
+
+    if (!capture?.success) {
+      capture = await captureWechatWindow('wechat', undefined, {
+        mode: 'screen',
+        bypassCache: true,
+        includeRelatedWindows: true
+      })
+    }
+
     if (!capture.success || !capture.screenshotBase64 || !capture.bounds || !capture.display) {
       throw new Error(capture.error || '微信窗口截图失败')
     }
@@ -685,7 +805,7 @@ export class WechatFriendAutomation {
 
     const startedAt = Date.now()
     const rawResponse = await this.aiClient.detectVision(
-      `${prompt}\n\n要求：坐标必须基于整张截图（截图可能同时包含微信主窗口和独立弹窗，例如“添加朋友”对话框），左上角为 0,0，右下角为 1000,1000；只有目标真实可见时才能输出坐标。如果目标尚未出现、仍在加载、下拉框未展开或弹窗未打开，输出 [WAITING]，不要猜测坐标；不要解释。`,
+      `${prompt}\n\n要求：坐标必须基于整张截图，左上角为 0,0，右下角为 1000,1000；只有目标真实可见时才能输出坐标。如果目标尚未出现、仍在加载、下拉框未展开或弹窗未打开，输出 [WAITING]，不要猜测坐标；不要解释。`,
       capture.screenshotBase64
     )
     const point = parsePoint(rawResponse)

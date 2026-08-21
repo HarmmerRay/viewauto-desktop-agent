@@ -5,6 +5,10 @@ out
 .eslintcache
 *.log*
 
+# ESLint report artifacts
+.eslint-*.txt
+.eslint-*.json
+
 # Local documents and config
 .local/
 

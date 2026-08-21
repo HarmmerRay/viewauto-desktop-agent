@@ -49,10 +49,7 @@ import {
   WechatFriendCustomer,
   WechatFriendOperationStatus
 } from '../core/wechat-friend-types'
-import {
-  fetchNextPendingCustomer,
-  updateCustomerStatus
-} from '../core/wechat-friend-api'
+import { fetchNextPendingCustomer, updateCustomerStatus } from '../core/wechat-friend-api'
 import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-store'
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
@@ -70,6 +67,8 @@ interface AppSettings {
   appType: AppType
   vision: {
     apiKey: string
+    model: string
+    baseURL: string
   }
   chatProvider: {
     manifestUrl: string
@@ -217,7 +216,7 @@ const settingsStore = new StoreClass({
   defaults: {
     locale: 'zh',
     appType: 'wechat',
-    vision: { apiKey: '' },
+    vision: { apiKey: '', model: FIXED_ARK_MODEL, baseURL: FIXED_ARK_BASE_URL },
     chatProvider: {
       manifestUrl: '',
       installed: null,
@@ -722,10 +721,11 @@ app.whenReady().then(async () => {
         return { success: false, error: '该轨迹暂无可学习的步骤' }
       }
 
+      const settings = normalizeSettings(settingsStore.store)
       const client = new AIClient({
         apiKey,
-        model: FIXED_ARK_MODEL,
-        baseURL: FIXED_ARK_BASE_URL
+        model: settings.vision.model,
+        baseURL: settings.vision.baseURL
       })
       const induced = await induceCardsFromSession(client, data.session, data.steps)
       if (induced.length === 0) {
@@ -808,8 +808,8 @@ app.whenReady().then(async () => {
 
     const client = new AIClient({
       apiKey: settings.vision.apiKey,
-      model: FIXED_ARK_MODEL,
-      baseURL: FIXED_ARK_BASE_URL
+      model: settings.vision.model,
+      baseURL: settings.vision.baseURL
     })
     const automation = new WechatFriendAutomation(client, {
       log: logWechatFriend,
@@ -992,8 +992,8 @@ app.whenReady().then(async () => {
 
       const client = new AIClient({
         apiKey: settings.vision.apiKey,
-        model: FIXED_ARK_MODEL,
-        baseURL: FIXED_ARK_BASE_URL
+        model: settings.vision.model,
+        baseURL: settings.vision.baseURL
       })
 
       wechatFriendStopRequested = false
@@ -1053,6 +1053,25 @@ app.whenReady().then(async () => {
               continue
             }
 
+            // 微信触发风控（操作过于频繁）：本次申请未真正发出成功，标记为跳过，继续后续账号。
+            if (error?.name === 'WechatFriendRateLimitedError') {
+              try {
+                await updateCustomerStatus(customer.id, '跳过', null, settings.customerApiUrl)
+                logWechatFriend(
+                  'skip',
+                  `客户 ${customer.name}（微信号 ${customer.wechat}）触发微信风控（操作过于频繁），本次未添加成功，已标记为跳过`
+                )
+              } catch (updateError: any) {
+                logWechatFriend(
+                  'error',
+                  `客户 ${customer.name} 标记为跳过失败：${updateError?.message || String(updateError)}`
+                )
+              }
+              skippedCount += 1
+              if (mode === 'single') break
+              continue
+            }
+
             throw error
           }
 
@@ -1079,7 +1098,7 @@ app.whenReady().then(async () => {
         const stopped = wechatFriendStopRequested
         const parts: string[] = []
         if (addedCount > 0) parts.push(`已发送 ${addedCount} 个好友申请`)
-        if (skippedCount > 0) parts.push(`跳过 ${skippedCount} 个无法找到的用户`)
+        if (skippedCount > 0) parts.push(`跳过 ${skippedCount} 个无法添加的账号`)
         const detail =
           parts.length > 0
             ? parts.join('，') + (stopped ? '（已停止）' : '')
@@ -1151,7 +1170,7 @@ app.whenReady().then(async () => {
     const settings = normalizeSettings(config || settingsStore.store)
     if (runtimeDevice) {
       // setApiKey 在 BoxSelectDevice 上是 no-op，对 RPADevice 才生效。
-      runtimeDevice.setApiKey(settings.vision.apiKey)
+      runtimeDevice.setApiKey(settings.vision.apiKey, settings.vision.model, settings.vision.baseURL)
       runtimeDevice.setAppType(settings.appType)
     }
     if (runtime) {
@@ -1161,11 +1180,12 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('engine:testConnection', async (_event, config) => {
-    const apiKey = config?.apiKey || normalizeSettings(settingsStore.store).vision.apiKey
+    const settings = normalizeSettings(settingsStore.store)
+    const apiKey = config?.apiKey || settings.vision.apiKey
     const client = new AIClient({
       apiKey,
-      model: FIXED_ARK_MODEL,
-      baseURL: FIXED_ARK_BASE_URL
+      model: config?.model || settings.vision.model || FIXED_ARK_MODEL,
+      baseURL: config?.baseURL || settings.vision.baseURL || FIXED_ARK_BASE_URL
     })
     return client.testConnection()
   })
@@ -1492,7 +1512,7 @@ async function buildDevice(
   if (effective === 'vlm') {
     const rpa = new RPADevice()
     rpa.setAppType(appType)
-    rpa.setApiKey(apiKey)
+    rpa.setApiKey(apiKey, settings.vision.model, settings.vision.baseURL)
     return { device: rpa, strategy: 'vlm' }
   }
 
@@ -1620,7 +1640,15 @@ function normalizeSettings(raw: any): AppSettings {
     locale: raw?.locale === 'en' ? 'en' : 'zh',
     appType: coerceAppType(raw?.appType),
     vision: {
-      apiKey: raw?.vision?.apiKey || oldApiKey || ''
+      apiKey: raw?.vision?.apiKey || oldApiKey || '',
+      model:
+        typeof raw?.vision?.model === 'string' && raw.vision.model.trim()
+          ? raw.vision.model.trim()
+          : FIXED_ARK_MODEL,
+      baseURL:
+        typeof raw?.vision?.baseURL === 'string' && raw.vision.baseURL.trim()
+          ? raw.vision.baseURL.trim()
+          : FIXED_ARK_BASE_URL
     },
     chatProvider: {
       manifestUrl: raw?.chatProvider?.manifestUrl || raw?.providerManifestUrl || '',

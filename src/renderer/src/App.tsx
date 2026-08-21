@@ -1,6 +1,8 @@
-﻿import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+﻿import { useState, useCallback, useRef, useEffect } from 'react'
 import { t } from './i18n'
 import MemoryWindow from './MemoryWindow'
+import SettingsPanel from './components/SettingsPanel'
+import AgentPanel from './components/AgentPanel'
 import './index.css'
 
 interface LogEntry {
@@ -78,7 +80,7 @@ interface InstalledProviderInfo {
 
 type ProviderConfigFieldType = 'text' | 'password' | 'url' | 'select' | 'textarea'
 
-interface ProviderConfigField {
+export interface ProviderConfigField {
   key: string
   label: string
   type: ProviderConfigFieldType
@@ -90,7 +92,7 @@ interface ProviderConfigField {
   options?: Array<{ label: string; value: string }>
 }
 
-interface ProviderCatalogItem {
+export interface ProviderCatalogItem {
   id: string
   name: string
   description?: string
@@ -108,7 +110,7 @@ interface ProviderHubCache {
   providers: ProviderCatalogItem[]
 }
 
-interface ProviderHubResult {
+export interface ProviderHubResult {
   success: boolean
   error?: string
   catalog?: ProviderHubCache | null
@@ -119,11 +121,13 @@ interface PerAppCapture {
   regions: BoxRegions | null
 }
 
-interface AppSettings {
+export interface AppSettings {
   locale: 'zh' | 'en'
   appType: AppType
   vision: {
     apiKey: string
+    model: string
+    baseURL: string
   }
   chatProvider: {
     manifestUrl: string
@@ -141,52 +145,6 @@ const VERIFICATION_MESSAGES: Array<{ id: string; label: string; message: string 
     id: 'default',
     label: '直播增量（默认话术）',
     message: '您好：我这边是直播增量部门的，无需投入任何成本，每月额外多增50%的销量，可以认识聊聊'
-  }
-]
-
-const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
-  {
-    id: 'doubao',
-    name: '豆包 Seed',
-    description:
-      '内置 OpenAI 兼容回复 Provider，可独立配置 API Key、Base URL 和支持图片输入的模型。',
-    version: '1.0.0',
-    manifestUrl: 'builtin://doubao',
-    capabilities: ['chat'],
-    configSchema: {
-      fields: [
-        {
-          key: 'apiKey',
-          label: 'API Key',
-          type: 'password',
-          required: true,
-          placeholder: '输入火山方舟 API Key'
-        },
-        {
-          key: 'model',
-          label: '模型',
-          type: 'text',
-          required: true,
-          defaultValue: 'doubao-seed-2-0-lite-260215',
-          hint: '回复流程会把聊天截图发送给模型，因此模型必须支持图片输入。'
-        },
-        {
-          key: 'baseURL',
-          label: 'Base URL',
-          type: 'url',
-          required: true,
-          placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
-          defaultValue: 'https://ark.cn-beijing.volces.com/api/v3',
-          hint: '支持填写 API 根地址，或直接填写完整的 /chat/completions 地址。'
-        },
-        {
-          key: 'systemPrompt',
-          label: '系统提示词',
-          type: 'textarea',
-          placeholder: '你是一个微信自动回复助手。根据截图中的聊天内容，生成合适的回复...'
-        }
-      ]
-    }
   }
 ]
 
@@ -229,22 +187,6 @@ const MemoryIcon = (): React.JSX.Element => (
     <path d="M3 12a9 9 0 1 0 3-6.7" />
     <path d="M3 4v5h5" />
     <path d="M12 7v5l3 3" />
-  </svg>
-)
-
-const RefreshIcon = (): React.JSX.Element => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M21 12a9 9 0 0 1-15.1 6.6" />
-    <path d="M3 12A9 9 0 0 1 18.1 5.4" />
-    <path d="M18 2v4h-4" />
-    <path d="M6 22v-4h4" />
   </svg>
 )
 
@@ -675,486 +617,6 @@ function SettingsWindow(): React.JSX.Element {
       </main>
     </div>
   )
-}
-
-function SettingsPanel() {
-  const [visionApiKey, setVisionApiKey] = useState('')
-  const [customerApiUrl, setCustomerApiUrl] = useState('')
-  const [friendAddIntervalMinutes, setFriendAddIntervalMinutes] = useState(0)
-  const [testing, setTesting] = useState(false)
-
-  useEffect(() => {
-    const load = async () => {
-      const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
-      if (settings) {
-        setVisionApiKey(settings.vision?.apiKey || '')
-        setCustomerApiUrl(settings.customerApiUrl || '')
-        setFriendAddIntervalMinutes(settings.friendAddIntervalMinutes ?? 0)
-      }
-    }
-
-    void load()
-  }, [])
-
-  const handleSaveVision = useCallback(async () => {
-    const payload: Partial<AppSettings> = {
-      vision: { apiKey: visionApiKey },
-      customerApiUrl,
-      friendAddIntervalMinutes
-    }
-    await window.electron?.invoke('settings:set', payload)
-    await window.electron?.invoke('engine:updateConfig', {
-      ...((await window.electron?.invoke('settings:getAll')) as AppSettings),
-      ...payload,
-      vision: { apiKey: visionApiKey }
-    })
-    showToast(t('settings.saved'), 'success')
-  }, [visionApiKey, customerApiUrl, friendAddIntervalMinutes])
-
-  const handleTestConnection = useCallback(async () => {
-    if (!visionApiKey) return
-    setTesting(true)
-    try {
-      const result = await window.electron?.invoke('engine:testConnection', {
-        apiKey: visionApiKey
-      })
-      if (result?.success) {
-        showToast(t('settings.testConnection.success'), 'success')
-      } else {
-        showToast(`${t('settings.testConnection.fail')}: ${result?.error || ''}`, 'error')
-      }
-    } catch (e: any) {
-      showToast(`${t('settings.testConnection.fail')}: ${e.message}`, 'error')
-    } finally {
-      setTesting(false)
-    }
-  }, [visionApiKey])
-
-  return (
-    <div className="settings-page slide-up">
-      <div className="settings-page-header">
-        <div>
-          <h1>基础配置</h1>
-          <p>维护桌面端运行所需的基础参数。</p>
-        </div>
-      </div>
-
-      <div className="card base-settings-card">
-        <div className="card-title">{t('settings.vision')}</div>
-
-        <div className="form-group">
-          <label className="form-label">{t('settings.visionApiKey')}</label>
-          <input
-            className="form-input"
-            type="password"
-            value={visionApiKey}
-            onChange={(e) => setVisionApiKey(e.target.value)}
-            placeholder={t('settings.visionApiKey.placeholder')}
-            autoComplete="off"
-          />
-          <div className="form-hint">{t('settings.visionApiKey.hint')}</div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">{t('settings.visionModel')}</label>
-          <input className="form-input" value="doubao-seed-2-0-lite-260215" disabled />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">{t('settings.visionBaseUrl')}</label>
-          <input className="form-input" value="https://ark.cn-beijing.volces.com/api/v3" disabled />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">客户记录后端地址</label>
-          <input
-            className="form-input"
-            type="url"
-            value={customerApiUrl}
-            onChange={(e) => setCustomerApiUrl(e.target.value)}
-            placeholder="http://192.168.8.94:8500"
-            autoComplete="off"
-          />
-          <div className="form-hint">自动添加好友时的取号与状态回写地址（如 http://192.168.8.94:8500）</div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">持续添加好友间隔</label>
-          <select
-            className="form-input"
-            value={friendAddIntervalMinutes}
-            onChange={(e) => setFriendAddIntervalMinutes(Number(e.target.value))}
-          >
-            <option value={0}>不等待（立即添加下一个）</option>
-            <option value={5}>5 分钟</option>
-            <option value={10}>10 分钟</option>
-            <option value={15}>15 分钟</option>
-            <option value={30}>30 分钟</option>
-            <option value={60}>60 分钟</option>
-          </select>
-          <div className="form-hint">
-            持续添加模式下，加完一个好友后等待该间隔再添加下一位，可降低被微信风控的风险。
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            className="btn btn-secondary"
-            onClick={handleTestConnection}
-            disabled={!visionApiKey || testing}
-          >
-            {testing ? t('settings.testConnection.testing') : t('settings.testConnection')}
-          </button>
-          <button className="btn btn-primary" onClick={handleSaveVision} style={{ flex: 1 }}>
-            {t('settings.saveVision')}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AgentPanel(): React.JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderCatalogItem[]>(BUILTIN_PROVIDER_CATALOG)
-  const [selectedId, setSelectedId] = useState(BUILTIN_PROVIDER_CATALOG[0]?.id || '')
-  const [activeId, setActiveId] = useState('doubao')
-  const [providerDrafts, setProviderDrafts] = useState<Record<string, Record<string, string>>>({})
-  const [currentSettings, setCurrentSettings] = useState<AppSettings | null>(null)
-  const [loadingCatalog, setLoadingCatalog] = useState(false)
-  const [updatingCatalog, setUpdatingCatalog] = useState(false)
-  const selectedProvider = catalog.find((provider) => provider.id === selectedId) || catalog[0]
-
-  const loadSettingsAndCatalog = useCallback(async (forceUpdate: boolean) => {
-    setLoadingCatalog(!forceUpdate)
-    setUpdatingCatalog(forceUpdate)
-    try {
-      const [settings, result] = await Promise.all([
-        window.electron?.invoke('settings:getAll') as Promise<AppSettings | undefined>,
-        window.electron?.invoke(
-          forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog'
-        ) as Promise<ProviderHubResult>
-      ])
-
-      const nextCatalog = mergeProviderCatalog(result?.catalog?.providers || [])
-      const nextActiveId = settings?.chatProvider?.installed?.id || 'doubao'
-      setCatalog(nextCatalog)
-      setCurrentSettings(settings || null)
-      setActiveId(nextActiveId)
-      setSelectedId(
-        (current) =>
-          current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || ''
-      )
-      setProviderDrafts((prev) => ({
-        ...prev,
-        doubao: {
-          ...getProviderDefaults(BUILTIN_PROVIDER_CATALOG[0]),
-          ...(prev.doubao || {}),
-          ...(!settings?.chatProvider?.installed ? settings?.chatProvider?.config || {} : {}),
-          apiKey: prev.doubao?.apiKey || settings?.vision?.apiKey || ''
-        },
-        [nextActiveId]: {
-          ...getProviderDefaults(nextCatalog.find((provider) => provider.id === nextActiveId)),
-          ...(prev[nextActiveId] || {}),
-          ...(settings?.chatProvider?.config || {})
-        }
-      }))
-
-      if (result && !result.success) {
-        showToast(`智能体列表加载失败: ${result.error || ''}`, 'error')
-      } else if (forceUpdate) {
-        showToast('智能体列表已更新', 'success')
-      }
-    } finally {
-      setLoadingCatalog(false)
-      setUpdatingCatalog(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void loadSettingsAndCatalog(false)
-  }, [loadSettingsAndCatalog])
-
-  const selectedValues = useMemo(
-    () => getProviderValues(providerDrafts, selectedProvider, currentSettings),
-    [currentSettings, providerDrafts, selectedProvider]
-  )
-
-  const setProviderValue = useCallback(
-    (fieldKey: string, value: string) => {
-      if (!selectedProvider) return
-      setProviderDrafts((prev) => ({
-        ...prev,
-        [selectedProvider.id]: {
-          ...getProviderValues(prev, selectedProvider, currentSettings),
-          [fieldKey]: value
-        }
-      }))
-    },
-    [currentSettings, selectedProvider]
-  )
-
-  const persistProvider = useCallback(
-    async (provider: ProviderCatalogItem, values: Record<string, string>) => {
-      const missing = getMissingRequiredFields(provider, values)
-      if (missing.length > 0) {
-        showToast(`缺少必填项: ${missing.join('、')}`, 'error')
-        return false
-      }
-
-      if (provider.id === 'doubao') {
-        await window.electron?.invoke('settings:set', {
-          chatProvider: {
-            manifestUrl: '',
-            installed: null,
-            config: values
-          }
-        })
-        const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
-        await window.electron?.invoke('engine:updateConfig', settings)
-        setCurrentSettings(settings)
-        setActiveId('doubao')
-        return true
-      }
-
-      const installResult = await window.electron?.invoke(
-        'provider:installFromUrl',
-        provider.manifestUrl
-      )
-      if (!installResult?.success) {
-        showToast(installResult?.error || '智能体安装失败', 'error')
-        return false
-      }
-
-      await window.electron?.invoke('settings:set', {
-        chatProvider: {
-          manifestUrl: provider.manifestUrl,
-          installed: installResult.installed,
-          config: values
-        }
-      })
-      const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
-      await window.electron?.invoke('engine:updateConfig', settings)
-      setCurrentSettings(settings)
-      setActiveId(provider.id)
-      return true
-    },
-    []
-  )
-
-  const handleSaveConfig = useCallback(async () => {
-    if (!selectedProvider) return
-    const ok = await persistProvider(selectedProvider, selectedValues)
-    if (ok) showToast('智能体配置已保存', 'success')
-  }, [persistProvider, selectedProvider, selectedValues])
-
-  const handleActivate = useCallback(async () => {
-    if (!selectedProvider) return
-    const ok = await persistProvider(selectedProvider, selectedValues)
-    if (ok) showToast('已切换当前智能体', 'success')
-  }, [persistProvider, selectedProvider, selectedValues])
-
-  return (
-    <div className="settings-page slide-up">
-      <div className="settings-page-header">
-        <div>
-          <div className="settings-title-row">
-            <h1>智能体</h1>
-            <button
-              className="icon-action refresh-action"
-              onClick={() => loadSettingsAndCatalog(true)}
-              disabled={updatingCatalog}
-              title={updatingCatalog ? '更新中...' : '更新列表'}
-              aria-label={updatingCatalog ? '更新中' : '更新智能体列表'}
-            >
-              <span className={updatingCatalog ? 'refresh-icon spinning' : 'refresh-icon'}>
-                <RefreshIcon />
-              </span>
-            </button>
-            {updatingCatalog ? <span className="inline-status">更新中...</span> : null}
-          </div>
-          <p>选择负责聊天分析和内容生成的智能体，并维护各自配置。</p>
-        </div>
-      </div>
-
-      {loadingCatalog ? (
-        <div className="provider-hub-meta">
-          <span className="spinner" />
-          正在加载远端智能体列表
-        </div>
-      ) : null}
-
-      <div className="provider-layout">
-        <div className="provider-list">
-          {!loadingCatalog && catalog.length === 0 ? (
-            <div className="provider-empty">暂无可用智能体，请点击更新列表。</div>
-          ) : null}
-          {catalog.map((provider) => {
-            const description = provider.description || provider.name
-            const active = activeId === provider.id
-
-            return (
-              <button
-                key={provider.id}
-                className={`provider-card ${selectedId === provider.id ? 'selected' : ''}`}
-                onClick={() => setSelectedId(provider.id)}
-              >
-                <div className="provider-card-top">
-                  <span className="provider-name">{provider.name}</span>
-                  {active ? (
-                    <span className="provider-status" title="当前启用" aria-label="当前启用">
-                      <span className="provider-status-dot" />
-                      启用中
-                    </span>
-                  ) : null}
-                </div>
-                <div className="provider-desc" title={description}>
-                  {description}
-                </div>
-                <div className="provider-version">v{provider.version}</div>
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="card provider-config-card">
-          {selectedProvider ? (
-            <>
-              <div className="provider-config-header">
-                <div>
-                  <div className="card-title">智能体配置</div>
-                  <h2>{selectedProvider.name}</h2>
-                </div>
-                <span className="provider-version">v{selectedProvider.version}</span>
-              </div>
-
-              {selectedProvider.configSchema.fields.map((field) => (
-                <ProviderFieldInput
-                  key={field.key}
-                  field={field}
-                  value={selectedValues[field.key] || ''}
-                  onChange={(value) => setProviderValue(field.key, value)}
-                />
-              ))}
-
-              <div className="provider-actions">
-                <button className="btn btn-secondary" onClick={handleSaveConfig}>
-                  保存配置
-                </button>
-                <button className="btn btn-primary" onClick={handleActivate}>
-                  启用此智能体
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="provider-empty">没有选中的智能体。</div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function ProviderFieldInput({
-  field,
-  value,
-  onChange
-}: {
-  field: ProviderConfigField
-  value: string
-  onChange: (value: string) => void
-}): React.JSX.Element {
-  return (
-    <div className="form-group">
-      <label className="form-label">
-        {field.label}
-        {field.required ? <span className="required-mark"> *</span> : null}
-      </label>
-      {field.type === 'textarea' ? (
-        <textarea
-          className="form-input"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={field.placeholder}
-          rows={4}
-          readOnly={field.readonly}
-        />
-      ) : field.type === 'select' ? (
-        <select
-          className="form-input"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          disabled={field.readonly}
-        >
-          {(field.options || []).map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          className="form-input"
-          type={field.type === 'password' ? 'password' : field.type === 'url' ? 'url' : 'text'}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={field.placeholder}
-          autoComplete="off"
-          readOnly={field.readonly}
-        />
-      )}
-      {field.hint ? <div className="form-hint">{field.hint}</div> : null}
-    </div>
-  )
-}
-
-function mergeProviderCatalog(remoteProviders: ProviderCatalogItem[]): ProviderCatalogItem[] {
-  const remoteOnly = remoteProviders.filter(
-    (provider) => !BUILTIN_PROVIDER_CATALOG.some((builtin) => builtin.id === provider.id)
-  )
-  return [...BUILTIN_PROVIDER_CATALOG, ...remoteOnly]
-}
-
-function getProviderDefaults(provider: ProviderCatalogItem | undefined): Record<string, string> {
-  if (!provider) return {}
-  return provider.configSchema.fields.reduce<Record<string, string>>((acc, field) => {
-    acc[field.key] = field.defaultValue || ''
-    return acc
-  }, {})
-}
-
-function getProviderValues(
-  drafts: Record<string, Record<string, string>>,
-  provider: ProviderCatalogItem | undefined,
-  settings: AppSettings | null
-): Record<string, string> {
-  if (!provider) return {}
-  const defaults = getProviderDefaults(provider)
-  if (provider.id === 'doubao') {
-    return {
-      ...defaults,
-      ...(settings?.chatProvider.installed ? {} : settings?.chatProvider.config || {}),
-      apiKey:
-        drafts.doubao?.apiKey ||
-        settings?.chatProvider.config?.apiKey ||
-        settings?.vision.apiKey ||
-        '',
-      ...(drafts.doubao || {})
-    }
-  }
-  return {
-    ...defaults,
-    ...(settings?.chatProvider.installed?.id === provider.id ? settings.chatProvider.config : {}),
-    ...(drafts[provider.id] || {})
-  }
-}
-
-function getMissingRequiredFields(
-  provider: ProviderCatalogItem,
-  values: Record<string, string>
-): string[] {
-  return provider.configSchema.fields
-    .filter((field) => field.required && !values[field.key]?.trim())
-    .map((field) => field.label)
 }
 
 let _showToast: ((msg: string, type: 'success' | 'error') => void) | null = null

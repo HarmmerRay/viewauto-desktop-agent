@@ -7,13 +7,15 @@
   remark?: string
 }
 
-/** 后端客户记录（GET /api/list 返回的字段）。 */
+/** 后端客户记录（GET /api/pending 返回的字段）。 */
 export interface WechatFriendCustomer {
   id: number
   name: string
   wechat: string
   channel: string
   status: string
+  remark?: string
+  note?: string
   created_at?: string
   added_at?: string
   verified_at?: string
