@@ -26,9 +26,6 @@ export function buildMemorySection(memoryCards?: MemoryCardBrief[]): string {
   return `\n\n## 团队经验（来自工作记忆，优先遵循）\n${lines.join('\n')}`
 }
 
-const DEFAULT_MODEL = 'doubao-seed-2-0-lite-260215'
-const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
-
 const REPLY_SYSTEM_PROMPT = `你是一个微信自动回复助手。你会收到一张微信/企业微信的聊天窗口截图。
 
 ## 你的任务
@@ -74,8 +71,8 @@ export class AIClient {
   constructor(config: Partial<AIClientConfig> & { apiKey: string }) {
     this.config = {
       apiKey: config.apiKey,
-      model: config.model || DEFAULT_MODEL,
-      baseURL: config.baseURL || DEFAULT_BASE_URL,
+      model: config.model || '',
+      baseURL: config.baseURL || '',
       systemPrompt: config.systemPrompt || REPLY_SYSTEM_PROMPT
     }
   }

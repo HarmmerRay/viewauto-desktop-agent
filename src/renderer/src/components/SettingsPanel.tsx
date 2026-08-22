@@ -39,8 +39,8 @@ const EyeOffIcon = (): React.JSX.Element => (
 
 export default function SettingsPanel(): React.JSX.Element {
   const [visionApiKey, setVisionApiKey] = useState('')
-  const [visionModel, setVisionModel] = useState('doubao-seed-2-0-lite-260215')
-  const [visionBaseUrl, setVisionBaseUrl] = useState('https://ark.cn-beijing.volces.com/api/v3')
+  const [visionModel, setVisionModel] = useState('')
+  const [visionBaseUrl, setVisionBaseUrl] = useState('')
   const [showVisionKey, setShowVisionKey] = useState(false)
   const [customerApiUrl, setCustomerApiUrl] = useState('')
   const [friendAddIntervalMinutes, setFriendAddIntervalMinutes] = useState(0)
@@ -51,8 +51,8 @@ export default function SettingsPanel(): React.JSX.Element {
       const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
       if (settings) {
         setVisionApiKey(settings.vision?.apiKey || '')
-        setVisionModel(settings.vision?.model || 'doubao-seed-2-0-lite-260215')
-        setVisionBaseUrl(settings.vision?.baseURL || 'https://ark.cn-beijing.volces.com/api/v3')
+        setVisionModel(settings.vision?.model || '')
+        setVisionBaseUrl(settings.vision?.baseURL || '')
         setCustomerApiUrl(settings.customerApiUrl || '')
         setFriendAddIntervalMinutes(settings.friendAddIntervalMinutes ?? 0)
       }
@@ -141,6 +141,7 @@ export default function SettingsPanel(): React.JSX.Element {
             onChange={(e) => setVisionModel(e.target.value)}
             autoComplete="off"
           />
+          <div className="form-hint">{t('settings.visionModel.hint')}</div>
         </div>
 
         <div className="form-group">
@@ -151,6 +152,7 @@ export default function SettingsPanel(): React.JSX.Element {
             onChange={(e) => setVisionBaseUrl(e.target.value)}
             autoComplete="off"
           />
+          <div className="form-hint">{t('settings.visionBaseUrl.hint')}</div>
         </div>
 
         <div className="form-group">

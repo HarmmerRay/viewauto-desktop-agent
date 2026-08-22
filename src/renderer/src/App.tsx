@@ -454,7 +454,7 @@ function ControlPanel({
           </div>
 
           <div className="friend-actions">
-            {friendBusy && friendAddMode === 'continuous' ? (
+            {friendBusy ? (
               <button className="btn btn-secondary btn-large" onClick={handleStopAutoAdd}>
                 停止添加
               </button>

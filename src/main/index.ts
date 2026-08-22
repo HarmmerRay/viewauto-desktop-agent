@@ -54,9 +54,6 @@ import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-st
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
 
-const FIXED_ARK_MODEL = 'doubao-seed-2-0-lite-260215'
-const FIXED_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
-
 interface PerAppCapture {
   strategy: CaptureStrategy
   regions: BoxRegions | null
@@ -216,7 +213,7 @@ const settingsStore = new StoreClass({
   defaults: {
     locale: 'zh',
     appType: 'wechat',
-    vision: { apiKey: '', model: FIXED_ARK_MODEL, baseURL: FIXED_ARK_BASE_URL },
+    vision: { apiKey: '', model: '', baseURL: '' },
     chatProvider: {
       manifestUrl: '',
       installed: null,
@@ -712,18 +709,18 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('memory:learnFromSession', async (_event, sessionId: string) => {
     try {
-      const apiKey = normalizeSettings(settingsStore.store).vision.apiKey
-      if (!apiKey) {
-        return { success: false, error: '请先在设置中填写视觉接口密钥' }
+      const settings = normalizeSettings(settingsStore.store)
+      const visionError = validateVisionSettings(settings)
+      if (visionError) {
+        return { success: false, error: visionError }
       }
       const data = await readTraceSession(worktraceBaseDir(), sessionId)
       if (!data || data.steps.length === 0) {
         return { success: false, error: '该轨迹暂无可学习的步骤' }
       }
 
-      const settings = normalizeSettings(settingsStore.store)
       const client = new AIClient({
-        apiKey,
+        apiKey: settings.vision.apiKey,
         model: settings.vision.model,
         baseURL: settings.vision.baseURL
       })
@@ -792,8 +789,9 @@ app.whenReady().then(async () => {
     }
 
     const settings = normalizeSettings(settingsStore.store)
-    if (!settings.vision.apiKey) {
-      return { success: false, stage: 'failed', error: '请先在设置中填写视觉接口密钥' }
+    const visionError = validateVisionSettings(settings)
+    if (visionError) {
+      return { success: false, stage: 'failed', error: visionError }
     }
 
     const account = String(request?.account || '').trim()
@@ -802,7 +800,7 @@ app.whenReady().then(async () => {
       appType: 'wechat',
       engineVersion: app.getVersion(),
       providerId: 'wechat-friend-operation',
-      model: FIXED_ARK_MODEL
+      model: settings.vision.model
     })
     updateWechatFriendStatus({ stage: 'preparing', account, sessionId: session.sessionId })
 
@@ -910,7 +908,7 @@ app.whenReady().then(async () => {
       appType: 'wechat',
       engineVersion: app.getVersion(),
       providerId: 'wechat-friend-auto-operation',
-      model: FIXED_ARK_MODEL
+      model: settings.vision.model
     })
     updateWechatFriendStatus({ stage: 'preparing', account, sessionId: session.sessionId })
 
@@ -983,8 +981,9 @@ app.whenReady().then(async () => {
       }
 
       const settings = normalizeSettings(settingsStore.store)
-      if (!settings.vision.apiKey) {
-        return { success: false, stage: 'failed', error: '请先在设置中填写视觉接口密钥' }
+      const visionError = validateVisionSettings(settings)
+      if (visionError) {
+        return { success: false, stage: 'failed', error: visionError }
       }
       const mode: WechatFriendAddMode = input?.mode === 'continuous' ? 'continuous' : 'single'
       const verificationMessage =
@@ -1170,7 +1169,11 @@ app.whenReady().then(async () => {
     const settings = normalizeSettings(config || settingsStore.store)
     if (runtimeDevice) {
       // setApiKey 在 BoxSelectDevice 上是 no-op，对 RPADevice 才生效。
-      runtimeDevice.setApiKey(settings.vision.apiKey, settings.vision.model, settings.vision.baseURL)
+      runtimeDevice.setApiKey(
+        settings.vision.apiKey,
+        settings.vision.model,
+        settings.vision.baseURL
+      )
       runtimeDevice.setAppType(settings.appType)
     }
     if (runtime) {
@@ -1182,10 +1185,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('engine:testConnection', async (_event, config) => {
     const settings = normalizeSettings(settingsStore.store)
     const apiKey = config?.apiKey || settings.vision.apiKey
+    const model = config?.model || settings.vision.model
+    const baseURL = config?.baseURL || settings.vision.baseURL
+    if (!apiKey) return { success: false, error: '请先在设置中填写视觉接口密钥' }
+    if (!model) return { success: false, error: '请先在设置中填写视觉模型ID' }
+    if (!baseURL) return { success: false, error: '请先在设置中填写视觉服务地址' }
     const client = new AIClient({
       apiKey,
-      model: config?.model || settings.vision.model || FIXED_ARK_MODEL,
-      baseURL: config?.baseURL || settings.vision.baseURL || FIXED_ARK_BASE_URL
+      model,
+      baseURL
     })
     return client.testConnection()
   })
@@ -1263,10 +1271,16 @@ app.whenReady().then(async () => {
 
   // ── 测试入口：VLM 并行 vs 串行 ──
   ipcMain.handle('test:vlm-parallel', async () => {
-    const apiKey = normalizeSettings(settingsStore.store).vision.apiKey
-    if (!apiKey) return { error: '请先在设置中填写视觉接口密钥' }
+    const settings = normalizeSettings(settingsStore.store)
+    const visionError = validateVisionSettings(settings)
+    if (visionError) return { error: visionError }
     const { runVlmParallelTest } = await import('../core/rpa/tests/test-vlm-parallel')
-    return await runVlmParallelTest(apiKey, 'wechat')
+    return await runVlmParallelTest(
+      settings.vision.apiKey,
+      'wechat',
+      settings.vision.model,
+      settings.vision.baseURL
+    )
   })
 
   // ── Skill HTTP Server（OpenClaw 远程启动 / 暂停接入点） ──
@@ -1321,8 +1335,16 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     const startupStrategy = resolveSettingsStrategy(appType, settings)
     const needsVisionKey = startupStrategy === 'vlm'
 
-    if (needsVisionKey && !settings.vision.apiKey) {
-      return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
+    if (needsVisionKey) {
+      if (!settings.vision.apiKey) {
+        return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
+      }
+      if (!settings.vision.model) {
+        return { ok: false, reason: 'no_vision_key', message: '请先填写视觉模型ID' }
+      }
+      if (!settings.vision.baseURL) {
+        return { ok: false, reason: 'no_vision_key', message: '请先填写视觉服务地址' }
+      }
     }
 
     // 回复模型与视觉定位模型使用独立配置；仅为旧配置兼容，在回复密钥为空时回退到视觉密钥。
@@ -1389,7 +1411,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       appType,
       engineVersion: app.getVersion(),
       providerId: settings.chatProvider.installed?.id ?? BUILTIN_DOUBAO_PROVIDER_ID,
-      model: settings.chatProvider.config?.model || FIXED_ARK_MODEL
+      model: settings.chatProvider.config?.model || settings.vision.model
     })
 
     const onTrace = (input: TraceStepInput): void => {
@@ -1616,9 +1638,17 @@ function normalizeCapture(raw: unknown): Partial<Record<AppType, PerAppCapture>>
   return out
 }
 
+/** 校验视觉配置是否完整，返回缺失项提示；完整时返回 null */
+function validateVisionSettings(settings: AppSettings): string | null {
+  if (!settings.vision.apiKey) return '请先在设置中填写视觉接口密钥'
+  if (!settings.vision.model) return '请先在设置中填写视觉模型ID'
+  if (!settings.vision.baseURL) return '请先在设置中填写视觉服务地址'
+  return null
+}
+
 function normalizeSettings(raw: any): AppSettings {
   const oldApiKey = typeof raw?.apiKey === 'string' ? raw.apiKey : ''
-  const oldModel = typeof raw?.model === 'string' && raw.model ? raw.model : FIXED_ARK_MODEL
+  const oldModel = typeof raw?.model === 'string' && raw.model ? raw.model : ''
   const oldSystemPrompt = typeof raw?.systemPrompt === 'string' ? raw.systemPrompt : ''
   const rawProviderConfig =
     raw?.chatProvider?.config && typeof raw.chatProvider.config === 'object'
@@ -1644,11 +1674,11 @@ function normalizeSettings(raw: any): AppSettings {
       model:
         typeof raw?.vision?.model === 'string' && raw.vision.model.trim()
           ? raw.vision.model.trim()
-          : FIXED_ARK_MODEL,
+          : '',
       baseURL:
         typeof raw?.vision?.baseURL === 'string' && raw.vision.baseURL.trim()
           ? raw.vision.baseURL.trim()
-          : FIXED_ARK_BASE_URL
+          : ''
     },
     chatProvider: {
       manifestUrl: raw?.chatProvider?.manifestUrl || raw?.providerManifestUrl || '',
