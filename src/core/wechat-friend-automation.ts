@@ -69,6 +69,17 @@ class WechatFriendRateLimitedError extends Error {
   }
 }
 
+/**
+ * 该帐号已经是当前登录微信的好友（此前已被人工手动添加）。
+ * 携带当前登录微信号，供上层回写“已申请过”状态（added_by_wechat = 当前登录微信号）。
+ */
+class WechatFriendAlreadyFriendError extends Error {
+  constructor(readonly wechatId: string | null) {
+    super('该帐号已经是微信好友')
+    this.name = 'WechatFriendAlreadyFriendError'
+  }
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 好友添加流程中可能出现的微信弹窗标题关键词（用于窗口列表检测与聚焦截图）。 */
@@ -540,12 +551,23 @@ export class WechatFriendAutomation {
       try {
         addTarget = await this.locateTarget(
           '添加到通讯录按钮',
-          '请查看当前微信用户资料页或资料弹窗，定位“添加到通讯录”按钮。它通常是一个实心绿色（或品牌色）圆角按钮，上面有白色文字“添加到通讯录”，位于资料页下方。\n\n注意：资料页中可能还有“视频号”“公众号”“朋友圈”“更多信息”等入口卡片。这些入口通常带有封面缩略图、头像或图标，是卡片样式；而“添加到通讯录”是一个纯色（绿色）实心圆角按钮，上面只有白色文字、没有封面图。两者视觉差异明显，绝对不要把带图标的入口卡片当成按钮。只输出绿色“添加到通讯录”按钮内部可点击位置：<point>x,y</point>。如果资料页或弹窗仍在加载，输出 [WAITING]；如果界面明确表明对方已经是好友并只显示“发消息”，输出 [ALREADY_FRIEND]；如果界面明确显示“无法找到该用户”“查无此人”等提示（说明该账号不存在，而不是没有“添加到通讯录”按钮），输出 [USER_NOT_FOUND]；如果只是看不到“添加到通讯录”按钮但没有“无法找到该用户”提示，输出 [NOT_FOUND]。',
+          '请查看当前微信用户资料页或资料弹窗，定位“添加到通讯录”按钮。它通常是一个实心绿色（或品牌色）圆角按钮，上面有白色文字“添加到通讯录”，位于资料页下方。\n\n注意：资料页中可能还有“视频号”“公众号”“朋友圈”“更多信息”等入口卡片。这些入口通常带有封面缩略图、头像或图标，是卡片样式；而“添加到通讯录”是一个纯色（绿色）实心圆角按钮，上面只有白色文字、没有封面图。两者视觉差异明显，绝对不要把带图标的入口卡片当成按钮。只输出绿色“添加到通讯录”按钮内部可点击位置：<point>x,y</point>。如果资料页或弹窗仍在加载，输出 [WAITING]；如果界面显示的是已添加好友的资料卡（包含“备注”“来源”“添加时间”等信息，下方只有“发消息”“语音聊天”“视频聊天”三个按钮而没有“添加到通讯录”按钮），输出 [ALREADY_FRIEND]；如果界面明确显示“无法找到该用户”“查无此人”等提示（说明该账号不存在，而不是没有“添加到通讯录”按钮），输出 [USER_NOT_FOUND]；如果只是看不到“添加到通讯录”按钮但没有“无法找到该用户”提示，输出 [NOT_FOUND]。',
           { initialDelayMs: attempt === 1 ? 700 : 300, timeoutMs: 15000, popupTitles: FRIEND_POPUP_TITLES }
         )
       } catch (error) {
         if (error instanceof WechatUiStateError && error.state === 'already_friend') {
-          throw new Error('该帐号已经是微信好友')
+          // 对方已是当前登录微信的好友：关闭资料卡弹窗，读取当前登录微信号，供上层回写“已申请过”。
+          await this.closeWechatPopup()
+          let currentWechatId: string | null = null
+          try {
+            currentWechatId = await this.readCurrentWechatId()
+          } catch (readError) {
+            this.callbacks.log(
+              'skip',
+              `该帐号已是好友，但读取当前微信号失败：${readError instanceof Error ? readError.message : String(readError)}`
+            )
+          }
+          throw new WechatFriendAlreadyFriendError(currentWechatId)
         }
         throw error
       }

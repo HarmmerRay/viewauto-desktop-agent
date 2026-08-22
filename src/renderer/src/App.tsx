@@ -121,6 +121,17 @@ interface PerAppCapture {
   regions: BoxRegions | null
 }
 
+export interface LocalAgent {
+  id: string
+  name: string
+  config: {
+    apiKey: string
+    model: string
+    baseURL: string
+    systemPrompt: string
+  }
+}
+
 export interface AppSettings {
   locale: 'zh' | 'en'
   appType: AppType
@@ -134,6 +145,8 @@ export interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  agents: LocalAgent[]
+  activeAgentId: string
   customerApiUrl: string
   friendAddIntervalMinutes: number
   defaultCaptureStrategy: CaptureStrategy
@@ -257,6 +270,7 @@ function ControlPanel({
 }) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [verificationId, setVerificationId] = useState(VERIFICATION_MESSAGES[0].id)
+  const [customMessage, setCustomMessage] = useState(VERIFICATION_MESSAGES[0].message)
   const [friendAddMode, setFriendAddMode] = useState<'single' | 'continuous'>('single')
   const [friendStatus, setFriendStatus] = useState<WechatFriendOperationStatus>({ stage: 'idle' })
   const logRef = useRef<HTMLDivElement>(null)
@@ -296,10 +310,8 @@ function ControlPanel({
   const operationLocked = status === 'running' || friendBusy || awaitingConfirmation
 
   const handleAutoAddFriend = useCallback(async () => {
-    const option =
-      VERIFICATION_MESSAGES.find((item) => item.id === verificationId) || VERIFICATION_MESSAGES[0]
     const result = (await window.electron?.invoke('wechatFriend:autoAdd', {
-      verificationMessage: option.message,
+      verificationMessage: customMessage.trim(),
       mode: friendAddMode
     })) as
       | {
@@ -324,7 +336,7 @@ function ControlPanel({
     } else {
       showToast(result?.error || '自动添加好友失败', 'error')
     }
-  }, [verificationId, friendAddMode])
+  }, [customMessage, friendAddMode])
 
   const handleStopAutoAdd = useCallback(async () => {
     await window.electron?.invoke('wechatFriend:stop')
@@ -431,7 +443,11 @@ function ControlPanel({
               id="friend-verification"
               className="form-input"
               value={verificationId}
-              onChange={(event) => setVerificationId(event.target.value)}
+              onChange={(event) => {
+                setVerificationId(event.target.value)
+                const preset = VERIFICATION_MESSAGES.find((item) => item.id === event.target.value)
+                if (preset) setCustomMessage(preset.message)
+              }}
               disabled={friendBusy || awaitingConfirmation}
             >
               {VERIFICATION_MESSAGES.map((item) => (
@@ -440,8 +456,16 @@ function ControlPanel({
                 </option>
               ))}
             </select>
+            <textarea
+              className="form-input"
+              value={customMessage}
+              onChange={(event) => setCustomMessage(event.target.value)}
+              placeholder="输入自定义的打招呼话术"
+              rows={3}
+              disabled={friendBusy || awaitingConfirmation}
+            />
             <div className="form-hint">
-              当前话术：{VERIFICATION_MESSAGES.find((item) => item.id === verificationId)?.message}
+              选择预设话术会自动填充上方内容，你也可以直接编辑自定义话术。
             </div>
           </div>
 
@@ -521,11 +545,14 @@ function BottomBar({
     }
     const required = providerInfo?.manifest?.configSchema?.required || []
     const isBuiltinDoubao = providerInfo?.isBuiltinDefault === true
+    const activeAgent =
+      settings.agents?.find((agent) => agent.id === settings.activeAgentId) || settings.agents?.[0]
+    const replyConfig = activeAgent?.config || settings.chatProvider.config
     const missing = required.find((key) => {
       const value =
         isBuiltinDoubao && key === 'apiKey'
-          ? settings.chatProvider.config?.apiKey || settings.vision.apiKey
-          : settings.chatProvider.config?.[key]
+          ? replyConfig.apiKey || settings.vision.apiKey
+          : replyConfig[key]
       return value === undefined || value === null || value === ''
     })
     if (missing) {

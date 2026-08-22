@@ -59,6 +59,25 @@ interface PerAppCapture {
   regions: BoxRegions | null
 }
 
+/** 本地智能体：本质是「名称 + OpenAI 兼容的 apiKey/prompt 配置」，运行在同一个内置回复运行时上。 */
+interface LocalAgent {
+  id: string
+  name: string
+  config: {
+    apiKey: string
+    model: string
+    baseURL: string
+    systemPrompt: string
+  }
+}
+
+const DEFAULT_AGENT_CONFIG = {
+  apiKey: '',
+  model: 'doubao-seed-2-0-lite-260215',
+  baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+  systemPrompt: ''
+}
+
 interface AppSettings {
   locale: 'zh' | 'en'
   appType: AppType
@@ -72,6 +91,9 @@ interface AppSettings {
     installed: InstalledProviderInfo | null
     config: Record<string, any>
   }
+  // 本地智能体列表 + 当前启用项
+  agents: LocalAgent[]
+  activeAgentId: string
   // 客户记录后端地址（自动添加好友的取号与状态回写用）
   customerApiUrl: string
   // 持续添加好友时，加完一个后等待的间隔（分钟），0 表示立即添加下一个
@@ -131,6 +153,7 @@ type ProviderHubManifest = {
 const DEFAULT_PROVIDER_HUB_URL =
   process.env.SIGHTFLOW_PROVIDER_HUB_URL || 'https://sightflow.dev/provider-hub.json'
 const PROVIDER_HUB_CACHE_KEY = 'providerHubCache'
+const FETCH_TIMEOUT_MS = 10_000
 
 // ── userData 目录迁移 ──
 // 应用重命名为 RAuto 后，Electron 的 userData 目录从 %APPDATA%/sightflow-desktop-agent
@@ -219,6 +242,8 @@ const settingsStore = new StoreClass({
       installed: null,
       config: {}
     },
+    agents: [],
+    activeAgentId: '',
     customerApiUrl: 'http://192.168.8.94:8500',
     friendAddIntervalMinutes: 0,
     defaultCaptureStrategy: 'auto',
@@ -484,11 +509,22 @@ function normalizeManifestConfigFields(configSchema: unknown): ProviderConfigFie
 }
 
 async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`)
+    }
+    return await response.json()
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`请求超时（${FETCH_TIMEOUT_MS / 1000}s）：${url}`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
   }
-  return response.json()
 }
 
 function getCachedProviderHub(): ProviderHubCache | null {
@@ -552,6 +588,9 @@ async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<Provide
 app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+
+  // 首次运行时把旧版单一 chatProvider 配置迁移为本地智能体列表。
+  seedLocalAgents()
 
   // 检查和请求 macOS 需要的权限
   await checkAndRequestPermissions()
@@ -651,16 +690,10 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('providerHub:getCatalog', async () => {
+    // 智能体目录只读本地缓存，不联网拉取远端；内置豆包始终可用。
     const cached = getCachedProviderHub()
     if (cached) return { success: true, catalog: cached }
-
-    try {
-      const catalog = await fetchProviderHub()
-      return { success: true, catalog }
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error)
-      return { success: false, error: message, catalog: null }
-    }
+    return { success: true, catalog: null }
   })
 
   ipcMain.handle('providerHub:update', async () => {
@@ -672,6 +705,95 @@ app.whenReady().then(async () => {
       const message = error instanceof Error ? error.message : String(error)
       return { success: false, error: message, catalog: cached }
     }
+  })
+
+  // ── 本地智能体 CRUD ──
+  ipcMain.handle('agent:list', async () => {
+    const settings = normalizeSettings(settingsStore.store)
+    return { agents: settings.agents, activeAgentId: settings.activeAgentId }
+  })
+
+  ipcMain.handle('agent:add', async (_event, name?: string) => {
+    const settings = normalizeSettings(settingsStore.store)
+    const agent: LocalAgent = {
+      id: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name:
+        typeof name === 'string' && name.trim()
+          ? name.trim()
+          : `智能体 ${settings.agents.length + 1}`,
+      config: { ...DEFAULT_AGENT_CONFIG }
+    }
+    const agents = [...settings.agents, agent]
+    const activeAgentId = settings.activeAgentId || agent.id
+    settingsStore.set({ ...settings, agents, activeAgentId } as any)
+    return { success: true, agent, agents, activeAgentId }
+  })
+
+  ipcMain.handle('agent:rename', async (_event, id: string, name: string) => {
+    const settings = normalizeSettings(settingsStore.store)
+    const trimmed = typeof name === 'string' ? name.trim() : ''
+    if (!trimmed) return { success: false, error: '名称不能为空' }
+    if (!settings.agents.some((a) => a.id === id)) return { success: false, error: '智能体不存在' }
+    const agents = settings.agents.map((a) => (a.id === id ? { ...a, name: trimmed } : a))
+    settingsStore.set({ ...settings, agents } as any)
+    return { success: true, agents }
+  })
+
+  ipcMain.handle('agent:delete', async (_event, id: string) => {
+    const settings = normalizeSettings(settingsStore.store)
+    if (settings.agents.length <= 1) return { success: false, error: '至少保留一个智能体' }
+    const agents = settings.agents.filter((a) => a.id !== id)
+    if (agents.length === settings.agents.length) return { success: false, error: '智能体不存在' }
+    const activeAgentId = settings.activeAgentId === id ? agents[0].id : settings.activeAgentId
+    settingsStore.set({ ...settings, agents, activeAgentId } as any)
+    return { success: true, agents, activeAgentId }
+  })
+
+  ipcMain.handle(
+    'agent:save',
+    async (
+      _event,
+      id: string,
+      patch: { name?: string; config?: Partial<LocalAgent['config']> }
+    ) => {
+      const settings = normalizeSettings(settingsStore.store)
+      const target = settings.agents.find((a) => a.id === id)
+      if (!target) return { success: false, error: '智能体不存在' }
+      const agents = settings.agents.map((a) => {
+        if (a.id !== id) return a
+        const cfg = patch?.config
+        return {
+          ...a,
+          name: typeof patch?.name === 'string' && patch.name.trim() ? patch.name.trim() : a.name,
+          config: {
+            apiKey: typeof cfg?.apiKey === 'string' ? cfg.apiKey : a.config.apiKey,
+            model: typeof cfg?.model === 'string' ? cfg.model : a.config.model,
+            baseURL: typeof cfg?.baseURL === 'string' ? cfg.baseURL : a.config.baseURL,
+            systemPrompt:
+              typeof cfg?.systemPrompt === 'string' ? cfg.systemPrompt : a.config.systemPrompt
+          }
+        }
+      })
+      settingsStore.set({ ...settings, agents } as any)
+      return { success: true, agents }
+    }
+  )
+
+  ipcMain.handle('agent:activate', async (_event, id: string) => {
+    const settings = normalizeSettings(settingsStore.store)
+    const target = settings.agents.find((a) => a.id === id)
+    if (!target) return { success: false, error: '智能体不存在' }
+    // 本地智能体共用内置 OpenAI 兼容回复运行时；把激活项的配置写入 chatProvider 供引擎读取。
+    settingsStore.set({
+      ...settings,
+      activeAgentId: id,
+      chatProvider: {
+        manifestUrl: '',
+        installed: null,
+        config: { ...target.config }
+      }
+    } as any)
+    return { success: true, activeAgentId: id, agents: settings.agents }
   })
 
   ipcMain.handle('settings:open', async () => {
@@ -1071,6 +1193,31 @@ app.whenReady().then(async () => {
               continue
             }
 
+            // 该微信号已经是当前登录微信的好友（此前被人工手动添加过）：
+            // 回写“已申请过”，并把 added_by_wechat 记录为当前登录微信号，继续后续账号。
+            if (error?.name === 'WechatFriendAlreadyFriendError') {
+              try {
+                await updateCustomerStatus(
+                  customer.id,
+                  '已申请过',
+                  error?.wechatId || null,
+                  settings.customerApiUrl
+                )
+                logWechatFriend(
+                  'skip',
+                  `客户 ${customer.name}（微信号 ${customer.wechat}）已经是当前微信号的好友，已标记为「已申请过」${error?.wechatId ? `（added_by_wechat=${error.wechatId}）` : ''}`
+                )
+              } catch (updateError: any) {
+                logWechatFriend(
+                  'error',
+                  `客户 ${customer.name} 标记为「已申请过」失败：${updateError?.message || String(updateError)}`
+                )
+              }
+              skippedCount += 1
+              if (mode === 'single') break
+              continue
+            }
+
             throw error
           }
 
@@ -1348,11 +1495,13 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     }
 
     // 回复模型与视觉定位模型使用独立配置；仅为旧配置兼容，在回复密钥为空时回退到视觉密钥。
+    // 优先使用当前启用的本地智能体配置；无本地智能体时回退到旧版 chatProvider 配置。
+    const replyConfig = resolveReplyConfig(settings)
     let provider
     if (!settings.chatProvider.installed) {
       const effectiveConfig = {
-        ...settings.chatProvider.config,
-        apiKey: settings.chatProvider.config?.apiKey || settings.vision.apiKey
+        ...replyConfig,
+        apiKey: replyConfig.apiKey || settings.vision.apiKey
       }
       const loaded = await loadBuiltinDoubaoProvider(effectiveConfig)
       provider = loaded.provider
@@ -1361,8 +1510,8 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       const isDoubao = settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
       const effectiveConfig = isDoubao
         ? {
-            ...settings.chatProvider.config,
-            apiKey: settings.chatProvider.config?.apiKey || settings.vision.apiKey
+            ...replyConfig,
+            apiKey: replyConfig.apiKey || settings.vision.apiKey
           }
         : settings.chatProvider.config
       const required = installedManifest?.configSchema?.required || []
@@ -1411,7 +1560,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       appType,
       engineVersion: app.getVersion(),
       providerId: settings.chatProvider.installed?.id ?? BUILTIN_DOUBAO_PROVIDER_ID,
-      model: settings.chatProvider.config?.model || settings.vision.model
+      model: replyConfig.model || settings.vision.model
     })
 
     const onTrace = (input: TraceStepInput): void => {
@@ -1666,6 +1815,13 @@ function normalizeSettings(raw: any): AppSettings {
     rawProviderConfig.systemPrompt = oldSystemPrompt
   }
 
+  const rawAgents = Array.isArray(raw?.agents) ? raw.agents : []
+  const agents = rawAgents.map((a) => normalizeAgent(a)).filter((a): a is LocalAgent => a !== null)
+  const activeAgentId =
+    typeof raw?.activeAgentId === 'string' && agents.some((a) => a.id === raw.activeAgentId)
+      ? raw.activeAgentId
+      : agents[0]?.id || ''
+
   return {
     locale: raw?.locale === 'en' ? 'en' : 'zh',
     appType: coerceAppType(raw?.appType),
@@ -1685,6 +1841,8 @@ function normalizeSettings(raw: any): AppSettings {
       installed: raw?.chatProvider?.installed || null,
       config: rawProviderConfig
     },
+    agents,
+    activeAgentId,
     customerApiUrl:
       typeof raw?.customerApiUrl === 'string' && raw.customerApiUrl.trim()
         ? raw.customerApiUrl.trim()
@@ -1698,6 +1856,59 @@ function normalizeSettings(raw: any): AppSettings {
     defaultCaptureStrategy: coerceStrategy(raw?.defaultCaptureStrategy, 'auto'),
     capture: normalizeCapture(raw?.capture)
   }
+}
+
+function normalizeAgent(raw: any): LocalAgent | null {
+  if (!raw || typeof raw !== 'object') return null
+  const id = typeof raw.id === 'string' ? raw.id.trim() : ''
+  const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+  if (!id || !name) return null
+  const config = raw.config && typeof raw.config === 'object' ? raw.config : {}
+  return {
+    id,
+    name,
+    config: {
+      apiKey: typeof config.apiKey === 'string' ? config.apiKey : '',
+      model: typeof config.model === 'string' ? config.model : '',
+      baseURL: typeof config.baseURL === 'string' ? config.baseURL : '',
+      systemPrompt: typeof config.systemPrompt === 'string' ? config.systemPrompt : ''
+    }
+  }
+}
+
+/** 首次运行时，把旧版单一 chatProvider 配置迁移为一个默认本地智能体。 */
+function seedLocalAgents(): void {
+  const current = normalizeSettings(settingsStore.store)
+  if (current.agents.length > 0) return
+
+  // 仅当未安装第三方 bundle（installed 为空）时，旧配置才是内置 doubao 的配置，可直接迁移。
+  const legacy = current.chatProvider.installed == null ? current.chatProvider.config || {} : {}
+  const agent: LocalAgent = {
+    id: 'doubao',
+    name: '豆包 Seed',
+    config: {
+      apiKey: (typeof legacy.apiKey === 'string' && legacy.apiKey) || current.vision.apiKey || '',
+      model:
+        (typeof legacy.model === 'string' && legacy.model.trim()) || DEFAULT_AGENT_CONFIG.model,
+      baseURL:
+        (typeof legacy.baseURL === 'string' && legacy.baseURL.trim()) ||
+        DEFAULT_AGENT_CONFIG.baseURL,
+      systemPrompt: typeof legacy.systemPrompt === 'string' ? legacy.systemPrompt : ''
+    }
+  }
+
+  settingsStore.set({
+    ...current,
+    agents: [agent],
+    activeAgentId: agent.id
+  } as any)
+}
+
+/** 返回当前启用本地智能体的配置；无本地智能体时回退到旧版 chatProvider 配置。 */
+function resolveReplyConfig(settings: AppSettings): Record<string, any> {
+  const active = settings.agents.find((a) => a.id === settings.activeAgentId) || settings.agents[0]
+  if (active) return { ...active.config }
+  return { ...settings.chatProvider.config }
 }
 
 function withSchemaDefaults(

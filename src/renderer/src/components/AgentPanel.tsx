@@ -1,303 +1,351 @@
 // src/renderer/src/components/AgentPanel.tsx
-// 智能体面板 — 选择、配置并启用聊天分析与内容生成 Provider。
+// 智能体面板 — 管理本地智能体（名称 + OpenAI 兼容 apiKey/prompt 配置）。
 //
-// 通过 IPC（settings:* / provider:* / engine:*）读写主进程中的设置。
+// 通过 IPC（agent:*）在主进程 settings 中增删改查本地智能体。
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-  showToast,
-  type AppSettings,
-  type ProviderCatalogItem,
-  type ProviderConfigField,
-  type ProviderHubResult
-} from '../App'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { showToast, type LocalAgent } from '../App'
 
-const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
-  {
-    id: 'doubao',
-    name: '豆包 Seed',
-    description:
-      '内置 OpenAI 兼容回复 Provider，可独立配置 API Key、Base URL 和支持图片输入的模型。',
-    version: '1.0.0',
-    manifestUrl: 'builtin://doubao',
-    capabilities: ['chat'],
-    configSchema: {
-      fields: [
-        {
-          key: 'apiKey',
-          label: 'API Key',
-          type: 'password',
-          required: true,
-          placeholder: '输入火山方舟 API Key'
-        },
-        {
-          key: 'model',
-          label: '模型',
-          type: 'text',
-          required: true,
-          defaultValue: 'doubao-seed-2-0-lite-260215',
-          hint: '回复流程会把聊天截图发送给模型，因此模型必须支持图片输入。'
-        },
-        {
-          key: 'baseURL',
-          label: 'Base URL',
-          type: 'url',
-          required: true,
-          placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
-          defaultValue: 'https://ark.cn-beijing.volces.com/api/v3',
-          hint: '支持填写 API 根地址，或直接填写完整的 /chat/completions 地址。'
-        },
-        {
-          key: 'systemPrompt',
-          label: '系统提示词',
-          type: 'textarea',
-          placeholder: '你是一个微信自动回复助手。根据截图中的聊天内容，生成合适的回复...'
-        }
-      ]
-    }
-  }
-]
-
-const RefreshIcon = (): React.JSX.Element => (
+const EyeIcon = (): React.JSX.Element => (
   <svg
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
-    strokeWidth="2"
+    strokeWidth="1.8"
     strokeLinecap="round"
     strokeLinejoin="round"
   >
-    <path d="M21 12a9 9 0 0 1-15.1 6.6" />
-    <path d="M3 12A9 9 0 0 1 18.1 5.4" />
-    <path d="M18 2v4h-4" />
-    <path d="M6 22v-4h4" />
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+    <circle cx="12" cy="12" r="3" />
   </svg>
 )
 
+const EyeOffIcon = (): React.JSX.Element => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-7-10-7a18.45 18.45 0 0 1 5.06-5.94" />
+    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 7 10 7a18.5 18.5 0 0 1-2.16 3.19" />
+    <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+    <path d="M1 1l22 22" />
+  </svg>
+)
+
+interface AgentField {
+  key: keyof LocalAgent['config']
+  label: string
+  type: 'password' | 'text' | 'url' | 'textarea'
+  required?: boolean
+  placeholder?: string
+  hint?: string
+}
+
+const AGENT_FIELDS: AgentField[] = [
+  {
+    key: 'apiKey',
+    label: 'API Key',
+    type: 'password',
+    required: true,
+    placeholder: '输入火山方舟 API Key'
+  },
+  {
+    key: 'model',
+    label: '模型',
+    type: 'text',
+    required: true,
+    hint: '回复流程会把聊天截图发送给模型，因此模型必须支持图片输入。'
+  },
+  {
+    key: 'baseURL',
+    label: 'Base URL',
+    type: 'url',
+    required: true,
+    placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
+    hint: '支持填写 API 根地址，或直接填写完整的 /chat/completions 地址。'
+  },
+  {
+    key: 'systemPrompt',
+    label: '系统提示词',
+    type: 'textarea',
+    placeholder: '你是一个微信自动回复助手。根据截图中的聊天内容，生成合适的回复...'
+  }
+]
+
+interface AgentListResult {
+  agents: LocalAgent[]
+  activeAgentId: string
+}
+
+interface AgentMutationResult {
+  success: boolean
+  agents?: LocalAgent[]
+  activeAgentId?: string
+  agent?: LocalAgent
+  error?: string
+}
+
 export default function AgentPanel(): React.JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderCatalogItem[]>(BUILTIN_PROVIDER_CATALOG)
-  const [selectedId, setSelectedId] = useState(BUILTIN_PROVIDER_CATALOG[0]?.id || '')
-  const [activeId, setActiveId] = useState('doubao')
-  const [providerDrafts, setProviderDrafts] = useState<Record<string, Record<string, string>>>({})
-  const [currentSettings, setCurrentSettings] = useState<AppSettings | null>(null)
-  const [loadingCatalog, setLoadingCatalog] = useState(false)
-  const [updatingCatalog, setUpdatingCatalog] = useState(false)
-  const selectedProvider = catalog.find((provider) => provider.id === selectedId) || catalog[0]
+  const [agents, setAgents] = useState<LocalAgent[]>([])
+  const [activeAgentId, setActiveAgentId] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const [nameDraft, setNameDraft] = useState('')
+  const [configDraft, setConfigDraft] = useState<LocalAgent['config']>({
+    apiKey: '',
+    model: '',
+    baseURL: '',
+    systemPrompt: ''
+  })
+  const [loading, setLoading] = useState(true)
+  const [showApiKey, setShowApiKey] = useState(false)
+  const prevSelectedIdRef = useRef('')
 
-  const loadSettingsAndCatalog = useCallback(async (forceUpdate: boolean) => {
-    setLoadingCatalog(!forceUpdate)
-    setUpdatingCatalog(forceUpdate)
+  const selected = useMemo(
+    () => agents.find((agent) => agent.id === selectedId) || agents[0],
+    [agents, selectedId]
+  )
+
+  const loadAgents = useCallback(async () => {
+    setLoading(true)
     try {
-      const [settings, result] = await Promise.all([
-        window.electron?.invoke('settings:getAll') as Promise<AppSettings | undefined>,
-        window.electron?.invoke(
-          forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog'
-        ) as Promise<ProviderHubResult>
-      ])
-
-      const nextCatalog = mergeProviderCatalog(result?.catalog?.providers || [])
-      const nextActiveId = settings?.chatProvider?.installed?.id || 'doubao'
-      setCatalog(nextCatalog)
-      setCurrentSettings(settings || null)
-      setActiveId(nextActiveId)
-      setSelectedId(
-        (current) =>
-          current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || ''
+      const result = (await window.electron?.invoke('agent:list')) as AgentListResult | undefined
+      const list = result?.agents || []
+      const active = result?.activeAgentId || list[0]?.id || ''
+      setAgents(list)
+      setActiveAgentId(active)
+      setSelectedId((current) =>
+        current && list.some((agent) => agent.id === current) ? current : active
       )
-      setProviderDrafts((prev) => ({
-        ...prev,
-        doubao: {
-          ...getProviderDefaults(BUILTIN_PROVIDER_CATALOG[0]),
-          ...(prev.doubao || {}),
-          ...(!settings?.chatProvider?.installed ? settings?.chatProvider?.config || {} : {}),
-          apiKey: prev.doubao?.apiKey || settings?.vision?.apiKey || ''
-        },
-        [nextActiveId]: {
-          ...getProviderDefaults(nextCatalog.find((provider) => provider.id === nextActiveId)),
-          ...(prev[nextActiveId] || {}),
-          ...(settings?.chatProvider?.config || {})
-        }
-      }))
-
-      if (result && !result.success) {
-        showToast(`智能体列表加载失败: ${result.error || ''}`, 'error')
-      } else if (forceUpdate) {
-        showToast('智能体列表已更新', 'success')
-      }
     } finally {
-      setLoadingCatalog(false)
-      setUpdatingCatalog(false)
+      setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadSettingsAndCatalog(false)
-  }, [loadSettingsAndCatalog])
+    void loadAgents()
+  }, [loadAgents])
 
-  const selectedValues = useMemo(
-    () => getProviderValues(providerDrafts, selectedProvider, currentSettings),
-    [currentSettings, providerDrafts, selectedProvider]
+  // 选中项变化时重置编辑草稿（保存后 id 不变，不会打断正在编辑的内容）。
+  useEffect(() => {
+    if (!selected || prevSelectedIdRef.current === selected.id) return
+    prevSelectedIdRef.current = selected.id
+    setNameDraft(selected.name)
+    setConfigDraft({ ...selected.config })
+  }, [selected])
+
+  const setField = useCallback((key: keyof LocalAgent['config'], value: string) => {
+    setConfigDraft((prev) => ({ ...prev, [key]: value }))
+  }, [])
+
+  const missingRequired = useMemo(
+    () =>
+      AGENT_FIELDS.filter((field) => field.required && !configDraft[field.key]?.trim()).map(
+        (field) => field.label
+      ),
+    [configDraft]
   )
 
-  const setProviderValue = useCallback(
-    (fieldKey: string, value: string) => {
-      if (!selectedProvider) return
-      setProviderDrafts((prev) => ({
-        ...prev,
-        [selectedProvider.id]: {
-          ...getProviderValues(prev, selectedProvider, currentSettings),
-          [fieldKey]: value
-        }
-      }))
-    },
-    [currentSettings, selectedProvider]
-  )
+  const handleAdd = useCallback(async () => {
+    const result = (await window.electron?.invoke('agent:add')) as AgentMutationResult | undefined
+    if (!result?.success) {
+      showToast(result?.error || '新增智能体失败', 'error')
+      return
+    }
+    setAgents(result.agents || [])
+    setActiveAgentId(result.activeAgentId || '')
+    setSelectedId(result.agent?.id || '')
+    showToast('已新增智能体', 'success')
+  }, [])
 
-  const persistProvider = useCallback(
-    async (provider: ProviderCatalogItem, values: Record<string, string>) => {
-      const missing = getMissingRequiredFields(provider, values)
-      if (missing.length > 0) {
-        showToast(`缺少必填项: ${missing.join('、')}`, 'error')
+  const persist = useCallback(
+    async (id: string): Promise<boolean> => {
+      if (missingRequired.length > 0) {
+        showToast(`缺少必填项: ${missingRequired.join('、')}`, 'error')
         return false
       }
-
-      if (provider.id === 'doubao') {
-        await window.electron?.invoke('settings:set', {
-          chatProvider: {
-            manifestUrl: '',
-            installed: null,
-            config: values
-          }
-        })
-        const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
-        await window.electron?.invoke('engine:updateConfig', settings)
-        setCurrentSettings(settings)
-        setActiveId('doubao')
-        return true
-      }
-
-      const installResult = await window.electron?.invoke(
-        'provider:installFromUrl',
-        provider.manifestUrl
-      )
-      if (!installResult?.success) {
-        showToast(installResult?.error || '智能体安装失败', 'error')
+      const result = (await window.electron?.invoke('agent:save', id, {
+        name: nameDraft,
+        config: configDraft
+      })) as AgentMutationResult | undefined
+      if (!result?.success) {
+        showToast(result?.error || '保存失败', 'error')
         return false
       }
-
-      await window.electron?.invoke('settings:set', {
-        chatProvider: {
-          manifestUrl: provider.manifestUrl,
-          installed: installResult.installed,
-          config: values
-        }
-      })
-      const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
-      await window.electron?.invoke('engine:updateConfig', settings)
-      setCurrentSettings(settings)
-      setActiveId(provider.id)
+      setAgents(result.agents || [])
       return true
     },
-    []
+    [configDraft, missingRequired, nameDraft]
   )
 
-  const handleSaveConfig = useCallback(async () => {
-    if (!selectedProvider) return
-    const ok = await persistProvider(selectedProvider, selectedValues)
-    if (ok) showToast('智能体配置已保存', 'success')
-  }, [persistProvider, selectedProvider, selectedValues])
+  const handleSave = useCallback(async () => {
+    if (!selected) return
+    if (await persist(selected.id)) showToast('智能体配置已保存', 'success')
+  }, [persist, selected])
 
   const handleActivate = useCallback(async () => {
-    if (!selectedProvider) return
-    const ok = await persistProvider(selectedProvider, selectedValues)
-    if (ok) showToast('已切换当前智能体', 'success')
-  }, [persistProvider, selectedProvider, selectedValues])
+    if (!selected) return
+    if (!(await persist(selected.id))) return
+    const result = (await window.electron?.invoke('agent:activate', selected.id)) as
+      | AgentMutationResult
+      | undefined
+    if (!result?.success) {
+      showToast(result?.error || '启用失败', 'error')
+      return
+    }
+    setActiveAgentId(result.activeAgentId || selected.id)
+    showToast('已切换当前智能体', 'success')
+  }, [persist, selected])
+
+  const handleDelete = useCallback(async () => {
+    if (!selected) return
+    if (agents.length <= 1) {
+      showToast('至少保留一个智能体', 'error')
+      return
+    }
+    if (!window.confirm(`确定删除智能体「${selected.name}」吗？`)) return
+    const result = (await window.electron?.invoke('agent:delete', selected.id)) as
+      | AgentMutationResult
+      | undefined
+    if (!result?.success) {
+      showToast(result?.error || '删除失败', 'error')
+      return
+    }
+    const list = result.agents || []
+    const nextActive = result.activeAgentId || list[0]?.id || ''
+    setAgents(list)
+    setActiveAgentId(nextActive)
+    setSelectedId(nextActive)
+    showToast('已删除智能体', 'success')
+  }, [agents.length, selected])
 
   return (
     <div className="settings-page slide-up">
       <div className="settings-page-header">
         <div>
-          <div className="settings-title-row">
-            <h1>智能体</h1>
-            <button
-              className="icon-action refresh-action"
-              onClick={() => loadSettingsAndCatalog(true)}
-              disabled={updatingCatalog}
-              title={updatingCatalog ? '更新中...' : '更新列表'}
-              aria-label={updatingCatalog ? '更新中' : '更新智能体列表'}
-            >
-              <span className={updatingCatalog ? 'refresh-icon spinning' : 'refresh-icon'}>
-                <RefreshIcon />
-              </span>
-            </button>
-            {updatingCatalog ? <span className="inline-status">更新中...</span> : null}
-          </div>
-          <p>选择负责聊天分析和内容生成的智能体，并维护各自配置。</p>
+          <h1>智能体</h1>
+          <p>本地智能体 = 名称 + apiKey + 提示词，可新增、重命名、删除并切换启用。</p>
         </div>
       </div>
 
-      {loadingCatalog ? (
+      {loading ? (
         <div className="provider-hub-meta">
           <span className="spinner" />
-          正在加载远端智能体列表
+          正在加载智能体
         </div>
       ) : null}
 
       <div className="provider-layout">
         <div className="provider-list">
-          {!loadingCatalog && catalog.length === 0 ? (
-            <div className="provider-empty">暂无可用智能体，请点击更新列表。</div>
+          {!loading && agents.length === 0 ? (
+            <div className="provider-empty">暂无智能体，点击下方按钮新增。</div>
           ) : null}
-          {catalog.map((provider) => {
-            const description = provider.description || provider.name
-            const active = activeId === provider.id
-
+          {agents.map((agent) => {
+            const active = activeAgentId === agent.id
             return (
               <button
-                key={provider.id}
-                className={`provider-card ${selectedId === provider.id ? 'selected' : ''}`}
-                onClick={() => setSelectedId(provider.id)}
+                key={agent.id}
+                className={`provider-card ${selected?.id === agent.id ? 'selected' : ''}`}
+                onClick={() => setSelectedId(agent.id)}
               >
                 <div className="provider-card-top">
-                  <span className="provider-name">{provider.name}</span>
+                  <span className="provider-name">{agent.name}</span>
                   {active ? (
-                    <span className="provider-status" title="当前启用" aria-label="当前启用">
+                    <span className="provider-status" title="当前启用">
                       <span className="provider-status-dot" />
                       启用中
                     </span>
                   ) : null}
                 </div>
-                <div className="provider-desc" title={description}>
-                  {description}
+                <div className="provider-desc" title={agent.config.model}>
+                  {agent.config.model || '未填写模型'}
                 </div>
-                <div className="provider-version">v{provider.version}</div>
+                <div className="provider-version">{agent.config.baseURL || '未填写 Base URL'}</div>
               </button>
             )
           })}
+          <button className="btn btn-secondary" onClick={handleAdd}>
+            + 新增智能体
+          </button>
         </div>
 
         <div className="card provider-config-card">
-          {selectedProvider ? (
+          {selected ? (
             <>
               <div className="provider-config-header">
                 <div>
                   <div className="card-title">智能体配置</div>
-                  <h2>{selectedProvider.name}</h2>
+                  <h2>{selected.name}</h2>
                 </div>
-                <span className="provider-version">v{selectedProvider.version}</span>
               </div>
 
-              {selectedProvider.configSchema.fields.map((field) => (
-                <ProviderFieldInput
-                  key={field.key}
-                  field={field}
-                  value={selectedValues[field.key] || ''}
-                  onChange={(value) => setProviderValue(field.key, value)}
+              <div className="form-group">
+                <label className="form-label">名称</label>
+                <input
+                  className="form-input"
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  placeholder="给这个智能体起个名字"
+                  autoComplete="off"
                 />
+              </div>
+
+              {AGENT_FIELDS.map((field) => (
+                <div className="form-group" key={field.key}>
+                  <label className="form-label">
+                    {field.label}
+                    {field.required ? <span className="required-mark"> *</span> : null}
+                  </label>
+                  {field.type === 'textarea' ? (
+                    <textarea
+                      className="form-input"
+                      value={configDraft[field.key]}
+                      onChange={(event) => setField(field.key, event.target.value)}
+                      placeholder={field.placeholder}
+                      rows={4}
+                    />
+                  ) : field.type === 'password' ? (
+                    <div className="input-with-action">
+                      <input
+                        className="form-input"
+                        type={showApiKey ? 'text' : 'password'}
+                        value={configDraft[field.key]}
+                        onChange={(event) => setField(field.key, event.target.value)}
+                        placeholder={field.placeholder}
+                        autoComplete="off"
+                      />
+                      <button
+                        type="button"
+                        className="input-action-btn"
+                        onClick={() => setShowApiKey((value) => !value)}
+                        title={showApiKey ? '隐藏' : '显示'}
+                        aria-label={showApiKey ? '隐藏' : '显示'}
+                      >
+                        {showApiKey ? <EyeOffIcon /> : <EyeIcon />}
+                      </button>
+                    </div>
+                  ) : (
+                    <input
+                      className="form-input"
+                      type={field.type === 'url' ? 'url' : 'text'}
+                      value={configDraft[field.key]}
+                      onChange={(event) => setField(field.key, event.target.value)}
+                      placeholder={field.placeholder}
+                      autoComplete="off"
+                    />
+                  )}
+                  {field.hint ? <div className="form-hint">{field.hint}</div> : null}
+                </div>
               ))}
 
               <div className="provider-actions">
-                <button className="btn btn-secondary" onClick={handleSaveConfig}>
+                <button className="btn btn-danger" onClick={handleDelete}>
+                  删除
+                </button>
+                <button className="btn btn-secondary" onClick={handleSave}>
                   保存配置
                 </button>
                 <button className="btn btn-primary" onClick={handleActivate}>
@@ -312,107 +360,4 @@ export default function AgentPanel(): React.JSX.Element {
       </div>
     </div>
   )
-}
-
-function ProviderFieldInput({
-  field,
-  value,
-  onChange
-}: {
-  field: ProviderConfigField
-  value: string
-  onChange: (value: string) => void
-}): React.JSX.Element {
-  return (
-    <div className="form-group">
-      <label className="form-label">
-        {field.label}
-        {field.required ? <span className="required-mark"> *</span> : null}
-      </label>
-      {field.type === 'textarea' ? (
-        <textarea
-          className="form-input"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={field.placeholder}
-          rows={4}
-          readOnly={field.readonly}
-        />
-      ) : field.type === 'select' ? (
-        <select
-          className="form-input"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          disabled={field.readonly}
-        >
-          {(field.options || []).map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          className="form-input"
-          type={field.type === 'password' ? 'password' : field.type === 'url' ? 'url' : 'text'}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={field.placeholder}
-          autoComplete="off"
-          readOnly={field.readonly}
-        />
-      )}
-      {field.hint ? <div className="form-hint">{field.hint}</div> : null}
-    </div>
-  )
-}
-
-function mergeProviderCatalog(remoteProviders: ProviderCatalogItem[]): ProviderCatalogItem[] {
-  const remoteOnly = remoteProviders.filter(
-    (provider) => !BUILTIN_PROVIDER_CATALOG.some((builtin) => builtin.id === provider.id)
-  )
-  return [...BUILTIN_PROVIDER_CATALOG, ...remoteOnly]
-}
-
-function getProviderDefaults(provider: ProviderCatalogItem | undefined): Record<string, string> {
-  if (!provider) return {}
-  return provider.configSchema.fields.reduce<Record<string, string>>((acc, field) => {
-    acc[field.key] = field.defaultValue || ''
-    return acc
-  }, {})
-}
-
-function getProviderValues(
-  drafts: Record<string, Record<string, string>>,
-  provider: ProviderCatalogItem | undefined,
-  settings: AppSettings | null
-): Record<string, string> {
-  if (!provider) return {}
-  const defaults = getProviderDefaults(provider)
-  if (provider.id === 'doubao') {
-    return {
-      ...defaults,
-      ...(settings?.chatProvider.installed ? {} : settings?.chatProvider.config || {}),
-      apiKey:
-        drafts.doubao?.apiKey ||
-        settings?.chatProvider.config?.apiKey ||
-        settings?.vision.apiKey ||
-        '',
-      ...(drafts.doubao || {})
-    }
-  }
-  return {
-    ...defaults,
-    ...(settings?.chatProvider.installed?.id === provider.id ? settings.chatProvider.config : {}),
-    ...(drafts[provider.id] || {})
-  }
-}
-
-function getMissingRequiredFields(
-  provider: ProviderCatalogItem,
-  values: Record<string, string>
-): string[] {
-  return provider.configSchema.fields
-    .filter((field) => field.required && !values[field.key]?.trim())
-    .map((field) => field.label)
 }
