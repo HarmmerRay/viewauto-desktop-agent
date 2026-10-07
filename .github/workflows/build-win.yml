@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-win:
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 60
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
