@@ -8,7 +8,7 @@
 import { WechatFriendCustomer } from './wechat-friend-types'
 
 export const DEFAULT_API_BASE_URL =
-  process.env.SIGHTFLOW_CUSTOMER_API_URL || 'http://192.168.8.94:8500'
+  process.env.SIGHTFLOW_CUSTOMER_API_URL || 'http://199.102.216.216/57dad064af8185c3/customers'
 
 function normalizeBaseUrl(baseUrl?: string): string {
   const raw = String(baseUrl || '').trim()

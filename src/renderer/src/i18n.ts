@@ -54,9 +54,9 @@ const translations = {
     'settings.showKey': '显示密钥',
     'settings.hideKey': '隐藏密钥',
     'settings.customerApiUrl': '客户记录后端地址',
-    'settings.customerApiUrl.placeholder': 'http://192.168.8.94:8500',
+    'settings.customerApiUrl.placeholder': 'http://199.102.216.216/57dad064af8185c3/customers',
     'settings.customerApiUrl.hint':
-      '自动添加好友时的取号与状态回写地址（如 http://192.168.8.94:8500）',
+      '自动添加好友时的取号与状态回写地址（如 http://199.102.216.216/57dad064af8185c3/customers）',
     'settings.friendAddInterval': '持续添加好友间隔',
     'settings.friendAddInterval.hint':
       '持续添加模式下，加完一个好友后等待该间隔再添加下一位，可降低被微信风控的风险。',
@@ -134,9 +134,9 @@ const translations = {
     'settings.showKey': 'Show key',
     'settings.hideKey': 'Hide key',
     'settings.customerApiUrl': 'Customer Backend URL',
-    'settings.customerApiUrl.placeholder': 'http://192.168.8.94:8500',
+    'settings.customerApiUrl.placeholder': 'http://199.102.216.216/57dad064af8185c3/customers',
     'settings.customerApiUrl.hint':
-      'Endpoint used to fetch pending customers and write back status (e.g. http://192.168.8.94:8500)',
+      'Endpoint used to fetch pending customers and write back status (e.g. http://199.102.216.216/57dad064af8185c3/customers)',
     'settings.friendAddInterval': 'Friend Add Interval',
     'settings.friendAddInterval.hint':
       'In continuous mode, wait this interval after each add to reduce WeChat risk-control flags.',

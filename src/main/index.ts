@@ -244,7 +244,7 @@ const settingsStore = new StoreClass({
     },
     agents: [],
     activeAgentId: '',
-    customerApiUrl: 'http://192.168.8.94:8500',
+    customerApiUrl: 'http://199.102.216.216/57dad064af8185c3/customers',
     friendAddIntervalMinutes: 0,
     defaultCaptureStrategy: 'auto',
     capture: {}
@@ -1846,7 +1846,7 @@ function normalizeSettings(raw: any): AppSettings {
     customerApiUrl:
       typeof raw?.customerApiUrl === 'string' && raw.customerApiUrl.trim()
         ? raw.customerApiUrl.trim()
-        : 'http://192.168.8.94:8500',
+        : 'http://199.102.216.216/57dad064af8185c3/customers',
     friendAddIntervalMinutes:
       typeof raw?.friendAddIntervalMinutes === 'number' &&
       Number.isFinite(raw.friendAddIntervalMinutes) &&
