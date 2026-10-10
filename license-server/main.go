@@ -2,14 +2,14 @@
 // 部署于 us-vps，监听 127.0.0.1:8811，由 nginx /57dad064af8185c3/rauto/ 反代。
 //
 // 客户端接口（无需鉴权）：
-//   POST /api/activate  {code, phone, device_id, device_name?}  首次激活（绑定设备）
-//   POST /api/verify    {code, phone, device_id}               启动校验
-//   POST /api/rebind    {code, phone, device_id, device_name?} 换绑到当前设备（旧设备立即失效）
+//   POST /api/activate  {code, device_id, device_name?}  首次激活（绑定设备）
+//   POST /api/verify    {code, device_id}                启动校验
+//   POST /api/rebind    {code, device_id, device_name?}  换绑到当前设备（旧设备立即失效）
 //
 // 管理接口（Authorization: Bearer <ADMIN_PASSWORD>）：
 //   GET    /admin/                        Web 管理页
 //   GET    /admin/api/codes               列表
-//   POST   /admin/api/codes               生成 {phone, days(0=永久), note?}
+//   POST   /admin/api/codes               生成 {days(0=永久), note?}
 //   POST   /admin/api/codes/{code}/disable | enable | unbind
 //   DELETE /admin/api/codes/{code}
 package main
@@ -23,7 +23,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +38,6 @@ const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 去掉易混淆的 I/
 var (
 	db            *sql.DB
 	adminPassword = os.Getenv("ADMIN_PASSWORD")
-	phoneRe       = regexp.MustCompile(`^\d{5,15}$`)
 )
 
 // ── 简单限流：客户端接口每 IP 每分钟 30 次 ──
@@ -107,15 +105,11 @@ func getCodeRow(code string) (*codeRow, error) {
 	return &r, nil
 }
 
-// checkUsable 公共校验：状态/手机号/有效期。返回 "" 表示可用。
-func checkUsable(w http.ResponseWriter, r *codeRow, phone string) string {
+// checkUsable 公共校验：状态/有效期。返回 "" 表示可用。
+func checkUsable(w http.ResponseWriter, r *codeRow) string {
 	if r.Status == "disabled" {
 		reply(w, false, "DISABLED", "激活码已被禁用，请联系卖家", nil)
 		return "DISABLED"
-	}
-	if subtle.ConstantTimeCompare([]byte(r.Phone), []byte(phone)) != 1 {
-		reply(w, false, "PHONE_MISMATCH", "手机号与激活码不匹配", nil)
-		return "PHONE_MISMATCH"
 	}
 	if r.ExpiresAt.Valid && time.Now().Unix() > r.ExpiresAt.Int64 {
 		reply(w, false, "EXPIRED", "激活码已过期，请联系卖家续期", nil)
@@ -126,7 +120,6 @@ func checkUsable(w http.ResponseWriter, r *codeRow, phone string) string {
 
 type clientReq struct {
 	Code       string `json:"code"`
-	Phone      string `json:"phone"`
 	DeviceID   string `json:"device_id"`
 	DeviceName string `json:"device_name"`
 }
@@ -138,13 +131,12 @@ func parseClientReq(w http.ResponseWriter, r *http.Request) (*clientReq, bool) {
 		return nil, false
 	}
 	req.Code = strings.ToUpper(strings.TrimSpace(req.Code))
-	req.Phone = strings.TrimSpace(req.Phone)
 	req.DeviceID = strings.TrimSpace(req.DeviceID)
 	if len(req.DeviceName) > 100 {
 		req.DeviceName = req.DeviceName[:100]
 	}
-	if req.Code == "" || !phoneRe.MatchString(req.Phone) || req.DeviceID == "" {
-		reply(w, false, "INVALID_INPUT", "请填写完整的手机号和激活码", nil)
+	if req.Code == "" || req.DeviceID == "" {
+		reply(w, false, "INVALID_INPUT", "请填写激活码", nil)
 		return nil, false
 	}
 	return &req, true
@@ -184,7 +176,7 @@ func handleActivate(w http.ResponseWriter, r *http.Request) {
 		reply(w, false, "CODE_NOT_FOUND", "激活码不存在", nil)
 		return
 	}
-	if checkUsable(w, row, req.Phone) != "" {
+	if checkUsable(w, row) != "" {
 		return
 	}
 	if row.DeviceID.Valid && row.DeviceID.String != req.DeviceID {
@@ -219,7 +211,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		reply(w, false, "CODE_NOT_FOUND", "激活码不存在", nil)
 		return
 	}
-	if checkUsable(w, row, req.Phone) != "" {
+	if checkUsable(w, row) != "" {
 		return
 	}
 	if !row.DeviceID.Valid {
@@ -248,7 +240,7 @@ func handleRebind(w http.ResponseWriter, r *http.Request) {
 		reply(w, false, "CODE_NOT_FOUND", "激活码不存在", nil)
 		return
 	}
-	if checkUsable(w, row, req.Phone) != "" {
+	if checkUsable(w, row) != "" {
 		return
 	}
 	db.Exec(`UPDATE codes SET device_id=?, device_name=?, last_verify_at=? WHERE code=?`,
@@ -368,17 +360,11 @@ func handleAdminCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Phone string `json:"phone"`
-		Days  int    `json:"days"`
-		Note  string `json:"note"`
+		Days int    `json:"days"`
+		Note string `json:"note"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 		reply(w, false, "INVALID_INPUT", "请求格式错误", nil)
-		return
-	}
-	req.Phone = strings.TrimSpace(req.Phone)
-	if !phoneRe.MatchString(req.Phone) {
-		reply(w, false, "INVALID_INPUT", "手机号格式不正确", nil)
 		return
 	}
 	var days sql.NullInt64
@@ -389,8 +375,9 @@ func handleAdminCreate(w http.ResponseWriter, r *http.Request) {
 		req.Note = req.Note[:200]
 	}
 	code := genCode()
+	// phone 列保留兼容旧数据，新码不再绑定手机号
 	_, err := db.Exec(`INSERT INTO codes (code, phone, duration_days, note, created_at) VALUES (?,?,?,?,?)`,
-		code, req.Phone, nullableInt(days), req.Note, time.Now().Unix())
+		code, "", nullableInt(days), req.Note, time.Now().Unix())
 	if err != nil {
 		reply(w, false, "DB", "写入失败", nil)
 		return

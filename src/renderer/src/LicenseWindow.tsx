@@ -2,10 +2,10 @@
 // RAuto 激活码授权窗口。
 //
 // 状态机：
-//   未激活（无本地授权）        → 手机号 + 激活码表单
+//   未激活（无本地授权）        → 激活码表单
 //   NETWORK（断网）            → 错误横幅 + [重试]
 //   DEVICE_CONFLICT（码已被别的设备用）→ 横幅"激活码已被使用" + [换绑到本机] + [换个激活码]
-//   其他错误（禁用/过期/不存在/手机号不匹配）→ 横幅 + 表单（预填）
+//   其他错误（禁用/过期/不存在）→ 横幅 + 表单（预填）
 import { useEffect, useState } from 'react'
 
 interface LicenseResult {
@@ -16,7 +16,6 @@ interface LicenseResult {
 
 interface LicenseState {
   code?: string
-  phone?: string
   reason?: string
   reasonMessage?: string
 }
@@ -24,7 +23,6 @@ interface LicenseState {
 type Mode = 'form' | 'conflict' | 'retry'
 
 export default function LicenseWindow(): React.JSX.Element {
-  const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
   const [mode, setMode] = useState<Mode>('form')
   const [banner, setBanner] = useState('')
@@ -34,26 +32,23 @@ export default function LicenseWindow(): React.JSX.Element {
     window.electron?.invoke('license:getState').then((raw: unknown) => {
       const state = (raw || {}) as LicenseState
       if (state?.code) setCode(state.code)
-      if (state?.phone) setPhone(state.phone)
       if (!state?.reason) return
       setBanner(state.reasonMessage || '')
       if (state.reason === 'DEVICE_CONFLICT') setMode('conflict')
       else if (state.reason === 'NETWORK') setMode('retry')
-      else if (state.reason === 'NOT_ACTIVATED') setMode('form')
-      else setMode('form') // DISABLED / EXPIRED / CODE_NOT_FOUND / PHONE_MISMATCH
+      else setMode('form') // NOT_ACTIVATED / DISABLED / EXPIRED / CODE_NOT_FOUND
     })
   }, [])
 
   async function handleActivate(): Promise<void> {
-    if (!phone.trim() || !code.trim()) {
-      setBanner('请填写手机号和激活码')
+    if (!code.trim()) {
+      setBanner('请填写激活码')
       return
     }
     setLoading(true)
     setBanner('')
     const r = (await window.electron?.invoke('license:activate', {
-      code: code.trim(),
-      phone: phone.trim()
+      code: code.trim()
     })) as LicenseResult
     setLoading(false)
     if (!r?.ok) {
@@ -68,8 +63,7 @@ export default function LicenseWindow(): React.JSX.Element {
     setLoading(true)
     setBanner('')
     const r = (await window.electron?.invoke('license:rebind', {
-      code: code.trim(),
-      phone: phone.trim()
+      code: code.trim()
     })) as LicenseResult
     setLoading(false)
     if (!r?.ok) setBanner(r?.message || '换绑失败')
@@ -132,14 +126,6 @@ export default function LicenseWindow(): React.JSX.Element {
 
         {mode === 'form' && (
           <>
-            <label className="license-label">手机号</label>
-            <input
-              className="license-input"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="购买激活码时预留的手机号"
-              maxLength={15}
-            />
             <label className="license-label">激活码</label>
             <input
               className="license-input code"

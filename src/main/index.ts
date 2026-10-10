@@ -1518,14 +1518,14 @@ app.whenReady().then(async () => {
     reasonMessage: licenseWindowError?.message || ''
   }))
 
-  ipcMain.handle('license:activate', async (_event, data: { code: string; phone: string }) => {
-    const result = await activateLicense(String(data?.code || ''), String(data?.phone || ''))
+  ipcMain.handle('license:activate', async (_event, data: { code: string }) => {
+    const result = await activateLicense(String(data?.code || ''))
     if (result.ok) onLicenseSuccess()
     return result
   })
 
-  ipcMain.handle('license:rebind', async (_event, data: { code: string; phone: string }) => {
-    const result = await rebindLicense(String(data?.code || ''), String(data?.phone || ''))
+  ipcMain.handle('license:rebind', async (_event, data: { code: string }) => {
+    const result = await rebindLicense(String(data?.code || ''))
     if (result.ok) onLicenseSuccess()
     return result
   })

@@ -29,7 +29,6 @@ const licenseStore = new StoreClass({
   name: 'license',
   defaults: {
     code: '',
-    phone: '',
     deviceIdFallback: ''
   }
 }) as unknown as Store<Record<string, string>>
@@ -72,15 +71,12 @@ export function getDeviceName(): string {
   return os.hostname()
 }
 
-export function getSavedLicense(): { code: string; phone: string } {
-  return {
-    code: licenseStore.get('code') || '',
-    phone: licenseStore.get('phone') || ''
-  }
+export function getSavedLicense(): { code: string } {
+  return { code: licenseStore.get('code') || '' }
 }
 
-function saveLicense(code: string, phone: string): void {
-  licenseStore.set({ code, phone })
+function saveLicense(code: string): void {
+  licenseStore.set({ code })
 }
 
 async function post(path: string, body: Record<string, unknown>): Promise<LicenseVerifyResult> {
@@ -114,35 +110,33 @@ async function post(path: string, body: Record<string, unknown>): Promise<Licens
   }
 }
 
-/** 启动校验：用本地保存的 code+phone+本机指纹联网验证。 */
+/** 启动校验：用本地保存的激活码+本机指纹联网验证。 */
 export async function verifyStoredLicense(): Promise<LicenseVerifyResult> {
-  const { code, phone } = getSavedLicense()
-  if (!code || !phone) {
+  const { code } = getSavedLicense()
+  if (!code) {
     return { ok: false, error: 'NOT_ACTIVATED', message: '尚未激活' }
   }
-  return post('/api/verify', { code, phone, device_id: getDeviceId() })
+  return post('/api/verify', { code, device_id: getDeviceId() })
 }
 
 /** 首次激活。成功后写入本地存储。 */
-export async function activateLicense(code: string, phone: string): Promise<LicenseVerifyResult> {
+export async function activateLicense(code: string): Promise<LicenseVerifyResult> {
   const result = await post('/api/activate', {
     code,
-    phone,
     device_id: getDeviceId(),
     device_name: getDeviceName()
   })
-  if (result.ok) saveLicense(code.trim().toUpperCase(), phone.trim())
+  if (result.ok) saveLicense(code.trim().toUpperCase())
   return result
 }
 
 /** 换绑到本机。成功后写入本地存储（旧设备授权立即失效）。 */
-export async function rebindLicense(code: string, phone: string): Promise<LicenseVerifyResult> {
+export async function rebindLicense(code: string): Promise<LicenseVerifyResult> {
   const result = await post('/api/rebind', {
     code,
-    phone,
     device_id: getDeviceId(),
     device_name: getDeviceName()
   })
-  if (result.ok) saveLicense(code.trim().toUpperCase(), phone.trim())
+  if (result.ok) saveLicense(code.trim().toUpperCase())
   return result
 }

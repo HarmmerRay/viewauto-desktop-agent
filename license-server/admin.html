@@ -63,9 +63,8 @@
   </div>
 
   <div class="card">
-    <h2>生成激活码（一个激活码绑定一个手机号）</h2>
+    <h2>生成激活码（一个激活码绑定一台设备）</h2>
     <div class="form-row">
-      <input id="fPhone" placeholder="手机号 *" maxlength="15">
       <select id="fDays">
         <option value="0">永久有效</option>
         <option value="7">7 天</option>
@@ -85,11 +84,11 @@
 
   <div class="card">
     <h2>激活码列表 <span class="muted" id="countText"></span></h2>
-    <div style="margin-bottom:12px"><input class="search" id="searchInput" placeholder="搜索手机号 / 激活码 / 备注" oninput="renderTable()"></div>
+    <div style="margin-bottom:12px"><input class="search" id="searchInput" placeholder="搜索激活码 / 设备 / 备注" oninput="renderTable()"></div>
     <div style="overflow-x:auto">
     <table>
       <thead><tr>
-        <th>激活码</th><th>手机号</th><th>状态</th><th>有效期</th><th>到期时间</th><th>绑定设备</th><th>创建时间</th><th>备注</th><th>操作</th>
+        <th>激活码</th><th>状态</th><th>有效期</th><th>到期时间</th><th>绑定设备</th><th>创建时间</th><th>备注</th><th>操作</th>
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -159,11 +158,10 @@ function stateTag(s) {
 function renderTable() {
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
   const list = codes.filter(c => !q ||
-    c.code.toLowerCase().includes(q) || c.phone.includes(q) || (c.note || '').toLowerCase().includes(q));
+    c.code.toLowerCase().includes(q) || (c.device_name || '').toLowerCase().includes(q) || (c.note || '').toLowerCase().includes(q));
   document.getElementById('countText').textContent = `（共 ${list.length} 条）`;
   document.getElementById('tbody').innerHTML = list.map(c => `<tr>
     <td><code>${c.code}</code></td>
-    <td>${c.phone}</td>
     <td>${stateTag(c.state)}</td>
     <td>${c.duration_days ? c.duration_days + ' 天' : '永久'}</td>
     <td>${fmt(c.expires_at)}</td>
@@ -181,15 +179,12 @@ function renderTable() {
 }
 
 async function createCode() {
-  const phone = document.getElementById('fPhone').value.trim();
   const days = document.getElementById('fDays').value;
   const note = document.getElementById('fNote').value.trim();
-  if (!phone) { toast('请填写手机号', false); return; }
-  const r = await api('/codes', { method: 'POST', body: JSON.stringify({ phone, days: +days, note }) });
+  const r = await api('/codes', { method: 'POST', body: JSON.stringify({ days: +days, note }) });
   if (r.ok) {
     document.getElementById('newCode').style.display = 'flex';
     document.getElementById('newCodeText').textContent = r.code;
-    document.getElementById('fPhone').value = '';
     document.getElementById('fNote').value = '';
     refresh();
   } else {
