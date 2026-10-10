@@ -1688,3 +1688,121 @@ textarea.form-input {
   background: var(--bg-glass-heavy);
   cursor: default;
 }
+
+/* ── 激活码授权窗口 ── */
+.license-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-base, #0a0b10);
+  padding: 20px;
+}
+
+.license-card {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.license-title {
+  font-size: 26px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text-primary, #f0f2f5);
+  margin: 0 0 4px;
+}
+
+.license-subtitle {
+  font-size: 13px;
+  text-align: center;
+  color: var(--text-muted, #8a919e);
+  margin: 0 0 22px;
+}
+
+.license-banner {
+  background: rgba(178, 59, 59, 0.15);
+  border: 1px solid rgba(178, 59, 59, 0.45);
+  color: #ff9d9d;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.license-label {
+  font-size: 12px;
+  color: var(--text-muted, #8a919e);
+  margin-bottom: 6px;
+}
+
+.license-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default, #2d3742);
+  background: var(--bg-glass-heavy, #14181f);
+  color: var(--text-primary, #f0f2f5);
+  font-size: 14px;
+  margin-bottom: 14px;
+  outline: none;
+}
+
+.license-input:focus {
+  border-color: #4f8cff;
+}
+
+.license-input.code {
+  letter-spacing: 1px;
+  font-family: ui-monospace, monospace;
+}
+
+.license-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.license-btn {
+  width: 100%;
+  padding: 11px 0;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.license-btn.primary {
+  background: #4f8cff;
+  color: #fff;
+}
+
+.license-btn.primary:hover:not(:disabled) {
+  background: #3d75e0;
+}
+
+.license-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--border-default, #2d3742);
+  color: var(--text-muted, #8a919e);
+}
+
+.license-btn.ghost:hover {
+  color: var(--text-primary, #f0f2f5);
+}
+
+.license-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.license-hint {
+  margin-top: 18px;
+  font-size: 11px;
+  text-align: center;
+  color: var(--text-muted, #8a919e);
+  line-height: 1.6;
+}

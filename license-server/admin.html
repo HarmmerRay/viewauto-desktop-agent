@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAuto · 激活码管理</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1419; color: #e6e6e6; min-height: 100vh; }
+  .login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .login-card { background: #1a212b; padding: 32px; border-radius: 12px; width: 320px; }
+  .login-card h1 { font-size: 18px; margin-bottom: 20px; text-align: center; }
+  input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #2d3742; background: #0f1419; color: #e6e6e6; font-size: 14px; margin-bottom: 12px; }
+  input:focus, select:focus { outline: none; border-color: #4f8cff; }
+  button { padding: 9px 16px; border-radius: 8px; border: none; background: #4f8cff; color: #fff; font-size: 14px; cursor: pointer; }
+  button:hover { background: #3d75e0; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: #2d3742; }
+  button.danger { background: #b23b3b; }
+  button.small { padding: 4px 10px; font-size: 12px; margin-right: 6px; }
+  .login-card button { width: 100%; }
+  .err { color: #ff7b72; font-size: 13px; margin-bottom: 10px; min-height: 18px; }
+  .page { max-width: 1180px; margin: 0 auto; padding: 24px 16px 60px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .topbar h1 { font-size: 20px; }
+  .card { background: #1a212b; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .card h2 { font-size: 15px; margin-bottom: 14px; color: #9fb3c8; }
+  .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .form-row > * { flex: 1; min-width: 140px; }
+  .form-row button { flex: 0 0 auto; height: 41px; }
+  .new-code { margin-top: 14px; padding: 12px; background: #10231a; border: 1px solid #1f6b3a; border-radius: 8px; display: none; align-items: center; gap: 12px; }
+  .new-code code { font-size: 18px; color: #7ee2a8; letter-spacing: 1px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #232c38; white-space: nowrap; }
+  th { color: #7d8ea3; font-weight: 500; }
+  td code { color: #9ecbff; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  .tag.on { background: #10231a; color: #7ee2a8; }
+  .tag.idle { background: #1d2634; color: #9fb3c8; }
+  .tag.off { background: #2b1a1a; color: #ff9d9d; }
+  .tag.warn { background: #2b2513; color: #ffd479; }
+  .muted { color: #5d6b7d; }
+  .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #1f6b3a; color: #fff; padding: 10px 20px; border-radius: 8px; display: none; z-index: 99; }
+  .search { max-width: 240px; }
+</style>
+</head>
+<body>
+<div class="toast" id="toast"></div>
+
+<div class="login-wrap" id="loginView">
+  <div class="login-card">
+    <h1>RAuto · 激活码管理</h1>
+    <div class="err" id="loginErr"></div>
+    <input type="password" id="pwd" placeholder="管理员密码" autofocus>
+    <button onclick="login()">登 录</button>
+  </div>
+</div>
+
+<div class="page" id="mainView" style="display:none">
+  <div class="topbar">
+    <h1>激活码管理</h1>
+    <button class="ghost" onclick="logout()">退出登录</button>
+  </div>
+
+  <div class="card">
+    <h2>生成激活码（一个激活码绑定一个手机号）</h2>
+    <div class="form-row">
+      <input id="fPhone" placeholder="手机号 *" maxlength="15">
+      <select id="fDays">
+        <option value="0">永久有效</option>
+        <option value="7">7 天</option>
+        <option value="30" selected>30 天</option>
+        <option value="90">90 天</option>
+        <option value="180">180 天</option>
+        <option value="365">365 天</option>
+      </select>
+      <input id="fNote" placeholder="备注（可选）" maxlength="100">
+      <button onclick="createCode()">生成</button>
+    </div>
+    <div class="new-code" id="newCode">
+      <span>新激活码：</span><code id="newCodeText"></code>
+      <button class="small" onclick="copyNewCode()">复制</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>激活码列表 <span class="muted" id="countText"></span></h2>
+    <div style="margin-bottom:12px"><input class="search" id="searchInput" placeholder="搜索手机号 / 激活码 / 备注" oninput="renderTable()"></div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>激活码</th><th>手机号</th><th>状态</th><th>有效期</th><th>到期时间</th><th>绑定设备</th><th>创建时间</th><th>备注</th><th>操作</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.pathname.replace(/\/admin\/?$/, '') + '/admin/api';
+let token = sessionStorage.getItem('rauto_admin_token') || '';
+let codes = [];
+
+function toast(msg, ok = true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = ok ? '#1f6b3a' : '#b23b3b';
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 2500);
+}
+
+async function api(path, opts = {}) {
+  opts.headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+  const r = await fetch(API + path, opts);
+  return r.json();
+}
+
+function fmt(ts) {
+  if (!ts) return '<span class="muted">—</span>';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function login() {
+  token = document.getElementById('pwd').value.trim();
+  const r = await api('/codes');
+  if (r.ok) {
+    sessionStorage.setItem('rauto_admin_token', token);
+    codes = r.codes;
+    showMain();
+  } else {
+    document.getElementById('loginErr').textContent = r.message || '登录失败';
+  }
+}
+
+function logout() {
+  sessionStorage.removeItem('rauto_admin_token');
+  location.reload();
+}
+
+function showMain() {
+  document.getElementById('loginView').style.display = 'none';
+  document.getElementById('mainView').style.display = 'block';
+  renderTable();
+}
+
+async function refresh() {
+  const r = await api('/codes');
+  if (r.ok) { codes = r.codes; renderTable(); }
+}
+
+function stateTag(s) {
+  const cls = { '已激活': 'on', '未激活': 'idle', '已禁用': 'off', '已过期': 'warn' }[s] || 'idle';
+  return `<span class="tag ${cls}">${s}</span>`;
+}
+
+function renderTable() {
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  const list = codes.filter(c => !q ||
+    c.code.toLowerCase().includes(q) || c.phone.includes(q) || (c.note || '').toLowerCase().includes(q));
+  document.getElementById('countText').textContent = `（共 ${list.length} 条）`;
+  document.getElementById('tbody').innerHTML = list.map(c => `<tr>
+    <td><code>${c.code}</code></td>
+    <td>${c.phone}</td>
+    <td>${stateTag(c.state)}</td>
+    <td>${c.duration_days ? c.duration_days + ' 天' : '永久'}</td>
+    <td>${fmt(c.expires_at)}</td>
+    <td title="${c.device_id}">${c.device_name || (c.device_id ? c.device_id.slice(0,8) : '<span class="muted">未绑定</span>')}</td>
+    <td>${fmt(c.created_at)}</td>
+    <td>${c.note || ''}</td>
+    <td>
+      ${c.state === '已禁用'
+        ? `<button class="small" onclick="act('${c.code}','enable','POST')">启用</button>`
+        : `<button class="small ghost" onclick="act('${c.code}','disable','POST')">禁用</button>`}
+      ${c.device_id ? `<button class="small ghost" onclick="act('${c.code}','unbind','POST')">解绑</button>` : ''}
+      <button class="small danger" onclick="delCode('${c.code}')">删除</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function createCode() {
+  const phone = document.getElementById('fPhone').value.trim();
+  const days = document.getElementById('fDays').value;
+  const note = document.getElementById('fNote').value.trim();
+  if (!phone) { toast('请填写手机号', false); return; }
+  const r = await api('/codes', { method: 'POST', body: JSON.stringify({ phone, days: +days, note }) });
+  if (r.ok) {
+    document.getElementById('newCode').style.display = 'flex';
+    document.getElementById('newCodeText').textContent = r.code;
+    document.getElementById('fPhone').value = '';
+    document.getElementById('fNote').value = '';
+    refresh();
+  } else {
+    toast(r.message || '生成失败', false);
+  }
+}
+
+function copyNewCode() {
+  navigator.clipboard.writeText(document.getElementById('newCodeText').textContent);
+  toast('已复制');
+}
+
+async function act(code, action, method) {
+  const label = { disable: '禁用', enable: '启用', unbind: '解绑设备' }[action];
+  if (!confirm(`确认${label}激活码 ${code}？`)) return;
+  const r = await api(`/codes/${encodeURIComponent(code)}/${action}`, { method });
+  toast(r.message || (r.ok ? '成功' : '失败'), r.ok);
+  refresh();
+}
+
+async function delCode(code) {
+  if (!confirm(`确认删除激活码 ${code}？删除后不可恢复！`)) return;
+  const r = await api(`/codes/${encodeURIComponent(code)}`, { method: 'DELETE' });
+  toast(r.message || (r.ok ? '已删除' : '失败'), r.ok);
+  refresh();
+}
+
+document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+if (token) {
+  api('/codes').then(r => { if (r.ok) { codes = r.codes; showMain(); } });
+}
+</script>
+</body>
+</html>

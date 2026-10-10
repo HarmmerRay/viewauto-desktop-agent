@@ -28,3 +28,6 @@ Thumbs.db
 
 # Local temp debug artifacts
 .tmp-*
+
+# RAuto 授权服务编译产物（10MB Go 二进制，服务器上重新编译）
+license-server/rauto-license

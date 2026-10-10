@@ -50,6 +50,7 @@ import {
   WechatFriendOperationStatus
 } from '../core/wechat-friend-types'
 import { fetchNextPendingCustomer, updateCustomerStatus } from '../core/wechat-friend-api'
+import { verifyStoredLicense, activateLicense, rebindLicense, getSavedLicense } from './license'
 import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-store'
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
@@ -259,6 +260,12 @@ let wechatFriendStopRequested = false
 let settingsWindow: BrowserWindow | null = null
 let memoryWindow: BrowserWindow | null = null
 
+// ── 激活码授权门禁 ──
+// licensed 为 true 才允许创建主窗口；启动时先联网 verify，失败（含断网）一律只开激活窗口。
+let licensed = false
+let licenseWindow: BrowserWindow | null = null
+let licenseWindowError: { error: string; message: string } | null = null
+
 // ── 工作记忆（work-trace + 经验卡片）单例，首次使用时初始化 ──
 let traceRecorderInstance: TraceRecorder | null = null
 let experienceStoreInstance: ExperienceStore | null = null
@@ -341,6 +348,78 @@ function createWindow(): void {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+// 激活窗口：未激活 / 校验失败（含断网）/ 设备冲突时展示，激活成功前不创建主窗口。
+function createLicenseWindow(error?: string, message?: string): void {
+  licenseWindowError = error ? { error, message: message || '' } : null
+  if (licenseWindow && !licenseWindow.isDestroyed()) {
+    licenseWindow.show()
+    licenseWindow.focus()
+    return
+  }
+
+  licenseWindow = new BrowserWindow({
+    width: 400,
+    height: 560,
+    resizable: false,
+    show: false,
+    autoHideMenuBar: true,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 12, y: 12 },
+    backgroundColor: '#0a0b10',
+    ...(process.platform === 'linux' ? { icon } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false
+    }
+  })
+
+  licenseWindow.on('ready-to-show', () => {
+    licenseWindow?.show()
+  })
+
+  licenseWindow.on('closed', () => {
+    licenseWindow = null
+    // 未通过授权就关掉激活窗口 = 退出软件（网络不通也进不去）
+    if (!licensed) app.quit()
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    licenseWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?window=license`)
+  } else {
+    licenseWindow.loadFile(join(__dirname, '../renderer/index.html'), {
+      query: { window: 'license' }
+    })
+  }
+}
+
+// 启动门禁：联网校验本地保存的授权，通过才进主界面。
+async function enterAppWithLicenseGate(): Promise<void> {
+  const result = await verifyStoredLicense()
+  if (result.ok) {
+    licensed = true
+    createWindow()
+    return
+  }
+  createLicenseWindow(result.error, result.message)
+}
+
+// 激活/换绑成功后的统一收尾：关激活窗、开主窗。
+// 注意 close() 是异步的，调用后窗口仍短暂存在于 getAllWindows() 中，
+// 必须等 'closed' 事件再判断，否则主窗永远不会被创建。
+function onLicenseSuccess(): void {
+  licensed = true
+  const win = licenseWindow
+  licenseWindow = null
+  if (win && !win.isDestroyed()) {
+    win.once('closed', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+    win.close()
+  } else if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
   }
 }
 
@@ -580,7 +659,6 @@ async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<Provide
   }
   settingsStore.set(PROVIDER_HUB_CACHE_KEY, cache)
   return cache
-  
 }
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
@@ -1433,11 +1511,47 @@ app.whenReady().then(async () => {
   // ── Skill HTTP Server（OpenClaw 远程启动 / 暂停接入点） ──
   startSkillServer(skillEngineController)
 
-  createWindow()
+  // ── 激活码授权 IPC ──
+  ipcMain.handle('license:getState', async () => ({
+    ...getSavedLicense(),
+    reason: licenseWindowError?.error || '',
+    reasonMessage: licenseWindowError?.message || ''
+  }))
+
+  ipcMain.handle('license:activate', async (_event, data: { code: string; phone: string }) => {
+    const result = await activateLicense(String(data?.code || ''), String(data?.phone || ''))
+    if (result.ok) onLicenseSuccess()
+    return result
+  })
+
+  ipcMain.handle('license:rebind', async (_event, data: { code: string; phone: string }) => {
+    const result = await rebindLicense(String(data?.code || ''), String(data?.phone || ''))
+    if (result.ok) onLicenseSuccess()
+    return result
+  })
+
+  ipcMain.handle('license:quit', async () => {
+    app.quit()
+  })
+
+  // 断网等情况下的“重试”：重新联网校验本地授权，成功则直接进主界面
+  ipcMain.handle('license:retry', async () => {
+    const result = await verifyStoredLicense()
+    if (result.ok) {
+      onLicenseSuccess()
+    } else {
+      licenseWindowError = { error: result.error, message: result.message }
+    }
+    return result
+  })
+
+  // 授权门禁：联网校验通过才创建主窗口，否则只开激活窗口
+  await enterAppWithLicenseGate()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
     // dock icon is clicked and there are no other windows open.
+    if (!licensed) return
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })

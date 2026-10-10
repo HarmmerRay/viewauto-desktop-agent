@@ -1,6 +1,7 @@
 ﻿import { useState, useCallback, useRef, useEffect } from 'react'
 import { t } from './i18n'
 import MemoryWindow from './MemoryWindow'
+import LicenseWindow from './LicenseWindow'
 import SettingsPanel from './components/SettingsPanel'
 import AgentPanel from './components/AgentPanel'
 import './index.css'
@@ -233,6 +234,10 @@ function App() {
         <Toast />
       </div>
     )
+  }
+
+  if (windowKind === 'license') {
+    return <LicenseWindow />
   }
 
   return (
